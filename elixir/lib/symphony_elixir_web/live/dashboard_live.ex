@@ -24,6 +24,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:notice_timer, nil)
       |> assign(:intents_filter, "all")
       |> assign(:collapsed, default_collapsed(payload))
+      |> assign(:selected_detail, nil)
+      |> assign(:detail, nil)
+      |> assign(:tracked_repos, load_tracked_repos())
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -36,7 +39,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
-    {:noreply, assign(socket, :now, DateTime.utc_now())}
+
+    socket =
+      socket
+      |> assign(:now, DateTime.utc_now())
+      |> maybe_refresh_detail()
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -46,6 +55,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
      |> assign(:payload, load_payload())
      |> assign(:runs, load_runs())
      |> assign(:intents, load_intents())
+     |> assign(:tracked_repos, load_tracked_repos())
      |> assign(:now, DateTime.utc_now())}
   end
 
@@ -126,6 +136,38 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   def handle_event("queue_repos", _params, socket) do
     {:noreply, put_notice(socket, :error, "Paste repo URLs or owner/name lines to queue.")}
+  end
+
+  @impl true
+  def handle_event("queue_tracked_repo", %{"repo" => repo}, socket)
+      when is_binary(repo) and repo != "" do
+    case queue_repo_intent(repo) do
+      {:ok, intent} ->
+        {:noreply,
+         socket
+         |> put_notice(:success, "Queued repo intent #{short_id(intent.id)} for #{repo_slug(repo)}.")
+         |> refresh_intents()}
+
+      {:error, reason} ->
+        {:noreply, put_notice(socket, :error, "Could not queue #{repo_slug(repo)}: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("queue_tracked_repo", _params, socket) do
+    {:noreply, put_notice(socket, :error, "Missing repo reference.")}
+  end
+
+  @impl true
+  def handle_event("toggle_issue_detail", %{"id" => id}, socket) when is_binary(id) do
+    if socket.assigns.selected_detail == id do
+      {:noreply, assign(socket, selected_detail: nil, detail: nil)}
+    else
+      {:noreply, assign(socket, selected_detail: id, detail: issue_detail_payload(id))}
+    end
+  end
+
+  def handle_event("toggle_issue_detail", _params, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -405,11 +447,37 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </form>
         </div>
 
+        <div class="queue-chips">
+          <h3 class="queue-title">Tracked on sandman</h3>
+          <p class="form-hint">
+            Repos with a build-bus watch pipeline on the control plane — click a chip to queue a repo job against its latest mirror.
+          </p>
+
+          <%= if @tracked_repos == [] do %>
+            <p class="empty-state">No tracked repos (SANDMAN_ADDR unset or nothing watched).</p>
+          <% else %>
+            <div class="queue-chips-list">
+              <button
+                :for={tracked <- @tracked_repos}
+                type="button"
+                class="queue-chip"
+                phx-click="queue_tracked_repo"
+                phx-value-repo={tracked.repo}
+                phx-value-state={tracked.watch_state}
+                title={"Queue a repo job against #{tracked.repo} (watch pipeline #{tracked.watch_pipeline} — #{tracked.watch_state})"}
+              >
+                <span><%= tracked.repo %></span>
+                <span class="chip-count"><%= tracked.watch_state %></span>
+              </button>
+            </div>
+          <% end %>
+        </div>
+
         <div class="queue-block">
           <h3 class="queue-title">Queued — waiting for a task</h3>
 
           <%= if count_state(@intents, "queued") == 0 do %>
-            <p class="empty-state">Nothing queued. Paste repo references in the queue form above, or queue them from the repo scanner on this machine.</p>
+            <p class="empty-state">Nothing queued. Paste repo references in the queue form above, or click a tracked repo above to queue a repo job.</p>
           <% else %>
             <div class="queue-list">
               <%= for intent <- queued_intents(@intents) do %>
@@ -798,6 +866,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <col style="width: 6rem;" />
                 <col style="width: 11rem;" />
                 <col />
+                <col style="width: 6.5rem;" />
               </colgroup>
               <thead>
                 <tr>
@@ -807,6 +876,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <th>Events</th>
                   <th>Last event</th>
                   <th>Last at</th>
+                  <th>Detail</th>
                 </tr>
               </thead>
               <tbody>
@@ -833,6 +903,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </div>
                   </td>
                   <td class="mono numeric" title={run.last_at || ""}><%= rel_time(run.last_at, @now) %></td>
+                  <td>
+                    <button
+                      type="button"
+                      class="subtle-button"
+                      phx-click="toggle_issue_detail"
+                      phx-value-id={run.issue_identifier}
+                    ><%= if @selected_detail == run.issue_identifier, do: "Close", else: "Detail" %></button>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -843,6 +921,92 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </p>
         <% end %>
       </section>
+
+      <%= if @selected_detail do %>
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Job detail — <span class="mono"><%= @selected_detail %></span></h2>
+              <p class="section-copy">
+                Live journal for this job: events, run attempts, and the latest agent transcript tail.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="subtle-button"
+              phx-click="toggle_issue_detail"
+              phx-value-id={@selected_detail}
+            >Close</button>
+          </div>
+
+          <%= if @detail[:error] do %>
+            <p class="empty-state">
+              No journal detail for this job yet — the run journal is disabled or nothing has been recorded.
+            </p>
+          <% else %>
+            <div class="queue-block">
+              <h3 class="queue-title">Events</h3>
+              <div class="table-wrap">
+                <table class="data-table data-table-journal">
+                  <colgroup>
+                    <col style="width: 6.5rem;" />
+                    <col style="width: 12rem;" />
+                    <col />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>At</th>
+                      <th>Event</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr :for={event <- @detail.events}>
+                      <td class="mono numeric" title={journal_field(event, "at") || ""}>
+                        <%= rel_time(journal_field(event, "at"), @now) %>
+                      </td>
+                      <td>
+                        <span class={journal_event_badge_class(journal_field(event, "event"))}>
+                          <%= journal_field(event, "event") || "event" %>
+                        </span>
+                      </td>
+                      <td>
+                        <span class="event-text" title={journal_event_summary(event)}>
+                          <%= journal_event_summary(event) %>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="queue-block">
+              <h3 class="queue-title">Runs</h3>
+              <%= if @detail.runs == [] do %>
+                <p class="empty-state">No run attempts recorded for this job yet.</p>
+              <% else %>
+                <div class="journal-runs">
+                  <span
+                    :for={run <- @detail.runs}
+                    class={run_status_badge_class(run.status)}
+                    title={"Run #{run.run_index}: #{run.status} · #{run.transcript_event_count} transcript events"}
+                  >run <%= run.run_index %> — <%= run.status %></span>
+                </div>
+              <% end %>
+            </div>
+
+            <div class="queue-block">
+              <h3 class="queue-title">Transcript tail</h3>
+              <%= if @detail.transcript == [] do %>
+                <p class="empty-state">No agent transcript entries recorded for the latest run yet.</p>
+              <% else %>
+                <pre class="code-panel"><%= journal_transcript_panel(@detail.transcript, @now) %></pre>
+              <% end %>
+            </div>
+          <% end %>
+        </section>
+      <% end %>
     </section>
     """
   end
@@ -1120,4 +1284,142 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
+
+  # ── Tracked repos (sandman watch pipelines) ──────────────────────────────
+
+  defp load_tracked_repos do
+    try do
+      case SymphonyElixir.TrackedRepos.fetch() do
+        {:ok, repos} when is_list(repos) -> repos
+        _ -> []
+      end
+    rescue
+      _ -> []
+    end
+  end
+
+  # ── Per-job detail panel ─────────────────────────────────────────────────
+
+  defp issue_detail_payload(identifier) do
+    try do
+      case Presenter.issue_runs_payload(identifier) do
+        {:ok, detail} when is_map(detail) -> detail
+        _ -> %{error: true}
+      end
+    rescue
+      _ -> %{error: true}
+    end
+  end
+
+  defp maybe_refresh_detail(socket) do
+    case socket.assigns.selected_detail do
+      nil -> socket
+      id -> assign(socket, :detail, issue_detail_payload(id))
+    end
+  end
+
+  defp journal_event_badge_class(event) when is_binary(event) do
+    base = "state-badge"
+
+    case event do
+      "run_started" -> "#{base} state-badge-active"
+      "job_started" -> "#{base} state-badge-active"
+      "run_finished" -> "#{base} state-badge-done"
+      "issue_terminal" -> "#{base} state-badge-done"
+      "job_finished" -> "#{base} state-badge-done"
+      "build_succeeded" -> "#{base} state-badge-done"
+      "delta_emitted" -> "#{base} state-badge-warning"
+      "build_submitted" -> "#{base} state-badge-warning"
+      _ -> base
+    end
+  end
+
+  defp journal_event_badge_class(_event), do: "state-badge"
+
+  defp journal_event_summary(event) when is_map(event) do
+    case journal_field(event, "event") do
+      "run_started" ->
+        run = journal_field(event, "run_index") || "?"
+        worker = journal_field(event, "worker_host") || "n/a"
+        "run #{run} started (worker #{worker})"
+
+      "run_finished" ->
+        run = journal_field(event, "run_index") || "?"
+        status = journal_field(event, "status") || "finished"
+        "run #{run} #{status} (#{journal_duration_ms(event)})"
+
+      "delta_emitted" ->
+        head = head12(journal_field(event, "head")) || "?"
+        image = journal_field(event, "image") || journal_field(event, "repo") || "?"
+        "delta → #{head} #{image}"
+
+      "build_submitted" ->
+        "build submitted #{journal_field(event, "image") || "?"}"
+
+      "job_started" ->
+        "watch job #{journal_field(event, "job_id") || "?"} running"
+
+      "job_finished" ->
+        "watch job #{journal_field(event, "job_id") || "?"} #{journal_field(event, "state") || "finished"}"
+
+      "build_succeeded" ->
+        "image #{journal_field(event, "image") || "?"}:#{journal_field(event, "tag") || "?"} published"
+
+      name when is_binary(name) ->
+        name
+
+      _ ->
+        "event"
+    end
+  end
+
+  defp journal_event_summary(_event), do: "event"
+
+  defp journal_duration_ms(event) do
+    case journal_field(event, "duration_ms") do
+      ms when is_integer(ms) -> "#{ms}ms"
+      _ -> "-"
+    end
+  end
+
+  defp head12(head) when is_binary(head), do: String.slice(head, 0, 12)
+  defp head12(_head), do: nil
+
+  defp journal_transcript_panel(transcript, now) when is_list(transcript) do
+    transcript
+    |> Enum.map(&journal_transcript_line(&1, now))
+    |> Enum.join("\n")
+  end
+
+  defp journal_transcript_panel(_transcript, _now), do: ""
+
+  defp journal_transcript_line(entry, now) when is_map(entry) do
+    at = rel_time(journal_field(entry, "at"), now)
+    event = journal_field(entry, "event") || "agent"
+
+    message =
+      entry
+      |> journal_field("message")
+      |> journal_message_text()
+      |> truncate_text(400)
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    if message == "", do: "#{at}  #{event}", else: "#{at}  #{event}: #{message}"
+  end
+
+  defp journal_transcript_line(_entry, _now), do: ""
+
+  defp journal_message_text(message) when is_binary(message), do: message
+  defp journal_message_text(nil), do: ""
+  defp journal_message_text(other), do: inspect(other, pretty: false, limit: :infinity)
+
+  defp journal_field(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      nil -> Map.get(map, to_string(key))
+      value -> value
+    end
+  end
+
+  defp journal_field(_map, _key), do: nil
 end

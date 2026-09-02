@@ -368,10 +368,14 @@ defmodule SymphonyElixir.BuildFusion do
 
   # ── Config / environment helpers ────────────────────────────────────────
 
+  # Field access goes through Map.get so a settings struct built without the
+  # newest fields (e.g. an older workflow config shape) can never crash the
+  # supervisor at boot — missing keys simply disable or use defaults.
   defp active? do
     case Config.settings() do
       {:ok, settings} ->
-        settings.observability.build_events_enabled and RepoDelta.sandman_base() != nil
+        Map.get(settings.observability, :build_events_enabled, false) and
+          RepoDelta.sandman_base() != nil
 
       _ ->
         false
@@ -380,7 +384,7 @@ defmodule SymphonyElixir.BuildFusion do
 
   defp interval_ms do
     case Config.settings() do
-      {:ok, settings} -> settings.observability.build_events_interval_ms
+      {:ok, settings} -> Map.get(settings.observability, :build_events_interval_ms, 15_000)
       _ -> 15_000
     end
   end
@@ -397,7 +401,7 @@ defmodule SymphonyElixir.BuildFusion do
 
   defp configured_registry do
     case Config.settings() do
-      {:ok, settings} -> settings.observability.build_events_registry
+      {:ok, settings} -> Map.get(settings.observability, :build_events_registry)
       _ -> nil
     end
   end

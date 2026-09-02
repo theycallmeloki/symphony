@@ -862,3 +862,74 @@ textarea.intent-form-input {
     padding: 1rem;
   }
 }
+
+.queue-chips {
+  margin-top: 1.25rem;
+}
+
+.queue-chips .queue-title {
+  margin-bottom: 0.2rem;
+}
+
+.queue-chips .form-hint {
+  margin-bottom: 0;
+}
+
+.queue-chips .empty-state {
+  margin-top: 0.6rem;
+}
+
+.queue-chips-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+}
+
+.queue-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--line-strong);
+  background: var(--card-muted);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 0.42rem 0.85rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  box-shadow: none;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.queue-chip:hover {
+  transform: none;
+  box-shadow: none;
+  background: var(--accent-soft);
+  border-color: rgba(16, 163, 127, 0.35);
+  color: var(--accent-ink);
+}
+
+.queue-chip .chip-count {
+  color: var(--muted);
+}
+
+.queue-chip:hover .chip-count {
+  color: var(--accent-ink);
+}
+
+.data-table-journal {
+  min-width: 0;
+}
+
+.journal-runs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}

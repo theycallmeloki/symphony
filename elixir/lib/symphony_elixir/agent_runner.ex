@@ -150,7 +150,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp build_events_registry do
-    case Config.settings!().observability.build_events_registry do
+    case Config.settings!().observability |> Map.get(:build_events_registry) do
       registry when is_binary(registry) and registry != "" -> registry
       _ -> BuildFusion.default_registry()
     end

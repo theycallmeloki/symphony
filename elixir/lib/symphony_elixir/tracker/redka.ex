@@ -91,6 +91,7 @@ defmodule SymphonyElixir.Tracker.Redka do
       state: intent.state,
       labels: intent.labels || [],
       url: nil,
+      repo: intent.repo,
       dispatchable: true,
       created_at: parse_datetime(intent.created_at),
       updated_at: parse_datetime(intent.updated_at)

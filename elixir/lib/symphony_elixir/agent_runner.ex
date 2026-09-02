@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRuntime, Config, PromptBuilder, RepoDelta, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -41,12 +41,19 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
+        # repo-backed intents get a working copy of the mirrored repo in
+        # the workspace before the agent starts (best effort, never fatal)
+        RepoDelta.best_effort_bootstrap(workspace, issue, worker_host)
+
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
+          # the run is over: deliver whatever the agent changed back to the
+          # mirrored repo as a delta (best effort, never fatal)
+          RepoDelta.best_effort_emit(workspace, issue, worker_host)
         end
 
       {:error, reason} ->

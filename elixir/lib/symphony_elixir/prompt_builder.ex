@@ -4,6 +4,7 @@ defmodule SymphonyElixir.PromptBuilder do
   """
 
   alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.Tracker.Issue
 
   @render_opts [strict_variables: true, strict_filters: true]
 
@@ -23,6 +24,7 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
+    |> append_repo_context(issue)
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -40,6 +42,24 @@ defmodule SymphonyElixir.PromptBuilder do
               },
               __STACKTRACE__
   end
+
+  # Repo-backed intents (an https clone URL mirrored into sandman) get a
+  # deterministic instruction block regardless of the workflow template: the
+  # workspace already holds a working copy of the mirrored repo, and the
+  # run's edits are delivered back as a delta after the run — never pushed.
+  defp append_repo_context(prompt, %Issue{repo: repo}) when is_binary(repo) and repo != "" do
+    prompt <>
+      """
+
+      Working repository:
+      - The workspace contains a real git checkout of the repository at #{repo} (the state mirrored in the sandman control plane).
+      - Make your changes as ordinary file edits in the workspace.
+      - Do NOT run git push, git commit, or git remote operations: the environment has no credentials, and the changes are captured automatically after the run.
+      - New files you create are part of the change set; deleted files are removed from it.
+      """
+  end
+
+  defp append_repo_context(prompt, _issue), do: prompt
 
   defp to_solid_map(map) when is_map(map) do
     Map.new(map, fn {key, value} -> {to_string(key), to_solid_value(value)} end)

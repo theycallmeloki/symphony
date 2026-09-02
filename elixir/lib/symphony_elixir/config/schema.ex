@@ -291,6 +291,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:build_events_enabled, :boolean, default: true)
       field(:build_events_interval_ms, :integer, default: 15_000)
       field(:build_events_registry, :string)
+      field(:auto_verify_enabled, :boolean, default: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -299,6 +300,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
       |> cast(attrs, [:run_journal_enabled, :run_journal_root], empty_values: [])
       |> cast(attrs, [:build_events_enabled, :build_events_interval_ms, :build_events_registry], empty_values: [])
+      |> cast(attrs, [:auto_verify_enabled], empty_values: [])
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
       |> validate_number(:build_events_interval_ms, greater_than: 0)

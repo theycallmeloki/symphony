@@ -163,6 +163,86 @@ defmodule SymphonyElixirWeb.IntentsApiController do
     end
   end
 
+  @spec verify(Conn.t(), map()) :: Conn.t()
+  def verify(conn, %{"intent_id" => intent_id}) do
+    case IntentStore.get_intent(intent_id) do
+      {:ok, %Intent{verify_for: verify_for}} when is_binary(verify_for) ->
+        error_response(conn, 409, :is_verify, "Verification passes cannot be re-verified")
+
+      {:ok, %Intent{} = intent} ->
+        case verifyable_intent(intent) do
+          {:ok, entry} ->
+            case SymphonyElixir.BuildFusion.verify_thread(intent_id, entry) do
+              {:ok, verify_id} ->
+                json(conn, %{
+                  verify: %{
+                    intent_id: intent_id,
+                    verify_intent: verify_id,
+                    head: entry.head,
+                    submitted: true
+                  }
+                })
+
+              {:error, :verify_pending} ->
+                error_response(
+                  conn,
+                  409,
+                  :verify_pending,
+                  "A verification pass for this thread is already queued or running"
+                )
+
+              {:error, reason} ->
+                error_response(conn, 502, :verify_failed, "Could not queue verification: #{inspect(reason)}")
+            end
+
+          {:error, code, message} ->
+            error_response(conn, 409, code, message)
+        end
+
+      {:error, :not_found} ->
+        error_response(conn, 404, :not_found, "Intent not found")
+
+      {:error, reason} ->
+        error_response(conn, 503, :store_unavailable, "Intent store unavailable: #{inspect(reason)}")
+    end
+  end
+
+  # Manual Verify-again needs a settled thread (the pass reads a stable
+  # workspace), a repo binding, the request text to verify, and at least
+  # one successful build whose head the pass references.
+  defp verifyable_intent(%Intent{} = intent) do
+    cond do
+      intent.state not in ~w(awaiting done) ->
+        {:error, :invalid_state,
+         "Thread is #{intent.state}; wait until it settles (awaiting or done) before verifying"}
+
+      not is_binary(intent.repo) ->
+        {:error, :missing_repo, "Thread has no repository binding"}
+
+      not is_binary(intent.description) or String.trim(intent.description) == "" ->
+        {:error, :missing_description, "Thread has no request text to verify"}
+
+      true ->
+        case last_built_head(intent.id) do
+          {:ok, head} when is_binary(head) and head != "" ->
+            {:ok, %{repo: intent.repo, head: head, description: intent.description}}
+
+          _ ->
+            {:error, :no_built_head, "No successful build recorded for this thread yet"}
+        end
+    end
+  end
+
+  defp last_built_head(intent_id) do
+    events = SymphonyElixir.RunJournal.issue_events(SymphonyElixir.RunJournal.root(), intent_id)
+
+    case Enum.reverse(events)
+         |> Enum.find(fn event -> Map.get(event, "event") == "build_succeeded" end) do
+      %{"head" => head} when is_binary(head) and head != "" -> {:ok, head}
+      _ -> {:error, :no_built_head}
+    end
+  end
+
   @spec close(Conn.t(), map()) :: Conn.t()
   def close(conn, %{"intent_id" => intent_id}) do
     case IntentStore.close_intent(intent_id) do

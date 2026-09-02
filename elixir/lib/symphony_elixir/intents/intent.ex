@@ -56,6 +56,16 @@ defmodule SymphonyElixir.Intents.Intent do
   def verify?(%__MODULE__{verify_for: verify_for}) when is_binary(verify_for), do: true
   def verify?(%__MODULE__{labels: labels}), do: "verify" in (labels || [])
 
+  @doc """
+  Whether auto-verification is disabled for this thread.
+
+  A thread created with the `no-verify` label never spawns an automatic
+  read-only verification pass after a successful build; the human triggers
+  verification explicitly via the Verify-again action.
+  """
+  @spec verify_disabled?(t()) :: boolean()
+  def verify_disabled?(%__MODULE__{labels: labels}), do: "no-verify" in (labels || [])
+
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do
     attrs =

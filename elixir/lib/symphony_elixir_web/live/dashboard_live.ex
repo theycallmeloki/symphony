@@ -68,6 +68,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:phase, nil)
       |> assign(:verifications, [])
       |> assign(:dirty_files, nil)
+      |> assign(:built_head, nil)
       |> assign(:expanded_run, nil)
       |> assign(:expanded_transcript, [])
       |> assign(:tracked_repos, load_tracked_repos())
@@ -307,6 +308,41 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("verify_intent", %{"id" => id}, socket) when is_binary(id) do
+    case socket.assigns do
+      %{thread: %{id: id, repo: repo, description: description}, built_head: head}
+      when is_binary(repo) and is_binary(head) and is_binary(description) ->
+        case SymphonyElixir.BuildFusion.verify_thread(
+               id,
+               %{repo: repo, head: head, description: description}
+             ) do
+          {:ok, verify_id} ->
+            {:noreply,
+             socket
+             |> put_notice(
+               :success,
+               "Verification pass " <> short_id(verify_id) <> " queued against " <> head12(head) <> "."
+             )
+             |> refresh_journal()}
+
+          {:error, :verify_pending} ->
+            {:noreply,
+             put_notice(socket, :error, "A verification pass is already queued or running for this thread.")}
+
+          {:error, reason} ->
+            {:noreply, put_notice(socket, :error, "Could not queue verification: #{inspect(reason)}")}
+        end
+
+      _ ->
+        {:noreply, put_notice(socket, :error, "Thread has no built head to verify yet.")}
+    end
+  end
+
+  def handle_event("verify_intent", _params, socket) do
+    {:noreply, put_notice(socket, :error, "Missing thread id.")}
+  end
+
+  @impl true
   def handle_event("send_prompt", %{"thread_id" => id, "description" => description}, socket)
       when is_binary(id) do
     trimmed = String.trim(description || "")
@@ -477,12 +513,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     case socket.assigns.selected do
       nil ->
-        assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, expanded_run: nil, expanded_transcript: [])
+        assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, built_head: nil, expanded_run: nil, expanded_transcript: [])
 
       id ->
         case Enum.find(intents, &(&1.id == id and &1.verify_for == nil)) do
           nil ->
-            assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, expanded_run: nil, expanded_transcript: [])
+            assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, built_head: nil, expanded_run: nil, expanded_transcript: [])
 
           thread ->
             verifications = verification_intents(intents, id)
@@ -517,9 +553,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       thread ->
         detail = issue_detail_payload(thread.id)
         dirty = dirty_files_for(thread)
+        built_head = last_built_head(detail)
 
         socket
-        |> assign(detail: detail, dirty_files: dirty)
+        |> assign(detail: detail, dirty_files: dirty, built_head: built_head)
         |> refresh_phase()
         |> refresh_expanded_transcript()
     end
@@ -534,6 +571,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp dirty_files_for(_thread), do: nil
 
+  # Most recent build_succeeded journal head, used by the Verify-again
+  # control; nil until the thread has a built+deployed head.
+  defp last_built_head(detail) do
+    detail
+    |> detail_events()
+    |> Enum.reverse()
+    |> Enum.find_value(fn event ->
+      if Map.get(event, "event") == "build_succeeded" do
+        case Map.get(event, "head") do
+          head when is_binary(head) and head != "" -> head
+          _ -> nil
+        end
+      end
+    end)
+  end
+
+
   defp maybe_refresh_detail(socket), do: refresh_journal(socket)
 
   defp refresh_expanded_transcript(socket) do
@@ -542,6 +596,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       {_thread, nil} -> assign(socket, :expanded_transcript, [])
       {thread, run_index} -> assign(socket, :expanded_transcript, thread_transcript(thread.id, run_index))
     end
+  end
+
+  defp verifying_open?(verifications) do
+    Enum.any?(verifications, &(&1.state in ~w(queued open running awaiting)))
   end
 
   defp thread_list(intents) do
@@ -1351,6 +1409,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 disabled={not deployable_thread?(@thread)}
                 title={if deployable_thread?(@thread), do: "Emit the parked workspace and submit a build", else: "Deploy needs a repo on the thread"}
               >Deploy &amp; build</button>
+            <div class="controls-block">
+              <div class="controls-title-row">
+                <h3 class="queue-title">Verification</h3>
+                <span class="muted controls-note">Read-only pass: does the built head satisfy the ask?</span>
+              </div>
+              <%= cond do %>
+                <% @built_head && !verifying_open?(@verifications) -> %>
+                  <button
+                    type="button"
+                    class="subtle-button verify-button"
+                    phx-click="verify_intent"
+                    phx-value-id={@thread.id}
+                  >Verify build</button>
+                  <%= if "no-verify" in (@thread.labels || []) do %>
+                    <span class="muted controls-note">auto-verify off — manual only</span>
+                  <% end %>
+                <% verifying_open?(@verifications) -> %>
+                  <span class="muted controls-note">Verification pass queued or running.</span>
+                <% @built_head -> %>
+                  <span class="muted controls-note">Built at <%= head12(@built_head) %> — already verified.</span>
+                <% true -> %>
+                  <span class="muted controls-note">No build to verify yet — deploys auto-queue a pass.</span>
+              <% end %>
+            </div>
             </div>
 
             <div class="controls-block">

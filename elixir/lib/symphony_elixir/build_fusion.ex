@@ -278,11 +278,14 @@ defmodule SymphonyElixir.BuildFusion do
     if "build_succeeded" in journaled and
          not entry.verify_started and
          auto_verify_enabled?() and
+         thread_auto_verify_enabled?(issue_identifier) and
          is_binary(entry.description) and
          String.trim(entry.description) != "" and
-         is_binary(entry.repo) and
-         no_active_verify?(issue_identifier) do
-      create_verify_intent(issue_identifier, entry)
+         is_binary(entry.repo) do
+      case verify_thread(issue_identifier, entry) do
+        {:ok, _verify_id} -> true
+        {:error, _reason} -> false
+      end
     else
       false
     end
@@ -290,15 +293,41 @@ defmodule SymphonyElixir.BuildFusion do
 
   defp auto_verify_enabled? do
     case Config.settings() do
-      {:ok, settings} ->
-        Map.get(settings.observability, :auto_verify_enabled, true)
-
-      _ ->
-        true
+      {:ok, settings} -> settings.observability.auto_verify_enabled
+      _ -> true
     end
   end
 
-  defp no_active_verify?(issue_identifier) do
+  # A thread registered with the `no-verify` label never auto-spawns a
+  # verification pass; the human triggers one explicitly with Verify-again.
+  # The label gates only the auto path — manual re-verifies are deliberate.
+  defp thread_auto_verify_enabled?(issue_identifier) do
+    case SymphonyElixir.Intents.IntentStore.get_intent(issue_identifier) do
+      {:ok, intent} -> not SymphonyElixir.Intents.Intent.verify_disabled?(intent)
+      _ -> true
+    end
+  end
+
+  @doc """
+  Queues one read-only verification pass against a thread's built head.
+
+  Shared by the auto-verify poller and the manual Verify-again action.
+  Deduplicates to a single non-terminal pass per thread; the
+  `verification_started` journal event is emitted exactly once per pass.
+  """
+  @spec verify_thread(String.t(), map()) ::
+          {:ok, String.t()} | {:error, :verify_pending | term()}
+  def verify_thread(issue_identifier, entry) do
+    if no_active_verify?(issue_identifier) do
+      create_verify_intent(issue_identifier, entry)
+    else
+      {:error, :verify_pending}
+    end
+  end
+
+  @doc false
+  @spec no_active_verify?(String.t()) :: boolean()
+  def no_active_verify?(issue_identifier) do
     case SymphonyElixir.Intents.IntentStore.list_intents() do
       {:ok, intents} ->
         not Enum.any?(intents, fn intent ->
@@ -360,14 +389,14 @@ defmodule SymphonyElixir.BuildFusion do
           "verify_intent" => verify_id
         })
 
-        true
+        {:ok, verify_id}
 
       {:error, reason} ->
         Logger.error(
-          "auto-verify intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}"
+          "verification intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}"
         )
 
-        false
+        {:error, reason}
     end
   end
 

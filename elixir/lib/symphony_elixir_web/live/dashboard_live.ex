@@ -748,6 +748,32 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  defp driver_next_action(%{state: "queued"}, _phase), do: "Assign task"
+  defp driver_next_action(%{state: state}, _phase) when state in ~w(open running), do: "Monitor run"
+
+  defp driver_next_action(%{state: "awaiting"}, %{current: current})
+       when current in [:deploy, :deployed, :verifying] do
+    "Watch verification"
+  end
+
+  defp driver_next_action(%{state: "awaiting"}, %{current: :verdict}), do: "Review verdict"
+  defp driver_next_action(%{state: "awaiting"}, _phase), do: "Deploy or prompt"
+  defp driver_next_action(%{state: "done"}, _phase), do: "Closed"
+  defp driver_next_action(%{state: "failed"}, _phase), do: "Inspect failure"
+  defp driver_next_action(%{state: "cancelled"}, _phase), do: "Cancelled"
+  defp driver_next_action(_thread, _phase), do: "Inspect"
+
+  defp driver_phase_label(%{current: current}) do
+    current
+    |> to_string()
+    |> String.replace("_", " ")
+  end
+
+  defp driver_phase_label(_phase), do: "loading"
+
+  defp detail_run_count(%{runs: runs}) when is_list(runs), do: length(runs)
+  defp detail_run_count(_detail), do: 0
+
   # ── Render ──────────────────────────────────────────────────────────────
 
   @impl true
@@ -833,6 +859,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </section>
       <% end %>
 
+      <.command_center threads={@threads} payload={@payload} intents={@intents} now={@now} />
+
       <div class="wb-body">
         <aside class="wb-rail">
           <div class="wb-rail-head">
@@ -898,6 +926,76 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
 
       <.system_drawer payload={@payload} runs={@runs} threads={@threads} selected={@selected} collapsed={@collapsed} now={@now} />
+    </section>
+    """
+  end
+
+  attr(:threads, :list, default: [])
+  attr(:payload, :map, default: nil)
+  attr(:intents, :list, default: [])
+  attr(:now, :map, required: true)
+
+  defp command_center(assigns) do
+    assigns =
+      assigns
+      |> assign(:operator_count, thread_count(assigns.threads, "awaiting") + payload_count(assigns.payload, :blocked))
+      |> assign(:oldest_operator_wait, oldest_operator_wait(assigns.threads, assigns.now))
+
+    ~H"""
+    <section class="harness-command" aria-label="Harness command center">
+      <div class="harness-command-head">
+        <div>
+          <p class="eyebrow">Control loop</p>
+          <h2 class="harness-command-title">Run many Codex sessions from one driver seat</h2>
+        </div>
+        <div class={operator_load_class(@operator_count)}>
+          <span class="operator-load-value numeric"><%= @operator_count %></span>
+          <span class="operator-load-label">operator action<%= if @operator_count == 1, do: "", else: "s" %></span>
+        </div>
+      </div>
+
+      <div class="harness-lanes">
+        <div class={lane_card_class(thread_count(@threads, "queued"))}>
+          <span class="lane-kicker">Intake</span>
+          <strong class="lane-value numeric"><%= thread_count(@threads, "queued") %></strong>
+          <span class="lane-label">queued threads</span>
+        </div>
+        <div class={lane_card_class(payload_count(@payload, :running))}>
+          <span class="lane-kicker">Execution</span>
+          <strong class="lane-value numeric"><%= payload_count(@payload, :running) %></strong>
+          <span class="lane-label">active sessions</span>
+        </div>
+        <div class={lane_card_class(thread_count(@threads, "awaiting"), "lane-card-attention")}>
+          <span class="lane-kicker">Driver seat</span>
+          <strong class="lane-value numeric"><%= thread_count(@threads, "awaiting") %></strong>
+          <span class="lane-label">ask-satisfied</span>
+        </div>
+        <div class={lane_card_class(verify_count(@intents))}>
+          <span class="lane-kicker">Assurance</span>
+          <strong class="lane-value numeric"><%= verify_count(@intents) %></strong>
+          <span class="lane-label">verification passes</span>
+        </div>
+        <div class={lane_card_class(payload_count(@payload, :blocked), "lane-card-danger")}>
+          <span class="lane-kicker">Interrupts</span>
+          <strong class="lane-value numeric"><%= payload_count(@payload, :blocked) %></strong>
+          <span class="lane-label">blocked sessions</span>
+        </div>
+      </div>
+
+      <div class="harness-hints">
+        <span>
+          Next operator wait:
+          <strong><%= @oldest_operator_wait %></strong>
+        </span>
+        <span>
+          Runtime:
+          <strong class="numeric"><%= runtime_summary(@payload, @now) %></strong>
+        </span>
+        <span>
+          Tokens:
+          <strong class="numeric"><%= payload_tokens(@payload) %></strong>
+        </span>
+      </div>
     </section>
     """
   end
@@ -1033,6 +1131,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
             data-confirm="Cancel this thread?"
           >Cancel</button>
         <% end %>
+      </div>
+    </div>
+
+    <div class="driver-brief" aria-label="Selected thread operating brief">
+      <div class="driver-brief-cell driver-brief-primary">
+        <span class="driver-brief-label">Next action</span>
+        <strong><%= driver_next_action(@thread, @phase) %></strong>
+      </div>
+      <div class="driver-brief-cell">
+        <span class="driver-brief-label">Run phase</span>
+        <strong><%= driver_phase_label(@phase) %></strong>
+      </div>
+      <div class="driver-brief-cell">
+        <span class="driver-brief-label">Attempts</span>
+        <strong class="numeric"><%= detail_run_count(@detail) %></strong>
+      </div>
+      <div class="driver-brief-cell">
+        <span class="driver-brief-label">Verifications</span>
+        <strong class="numeric"><%= length(@verifications) %></strong>
       </div>
     </div>
 
@@ -2000,6 +2117,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp payload_tokens(_payload), do: "n/a"
 
+  defp runtime_summary(%{codex_totals: _totals} = payload, now) do
+    format_runtime_seconds(total_runtime_seconds(payload, now))
+  rescue
+    _ -> "n/a"
+  end
+
+  defp runtime_summary(_payload, _now), do: "n/a"
+
   defp ops_count(payload) do
     running = payload_count(payload, :running)
     blocked = payload_count(payload, :blocked)
@@ -2017,6 +2142,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp displayed_threads(threads, state) do
     Enum.filter(threads, &(&1.state == state))
   end
+
+  defp oldest_operator_wait(threads, now) do
+    threads
+    |> Enum.filter(&(&1.state == "awaiting"))
+    |> Enum.map(&intent_stamp/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(&DateTime.to_unix/1)
+    |> case do
+      [] -> "none"
+      [oldest | _] -> rel_time(oldest, now)
+    end
+  end
+
+  defp operator_load_class(0), do: "operator-load"
+  defp operator_load_class(_count), do: "operator-load operator-load-hot"
+
+  defp lane_card_class(0), do: "lane-card"
+  defp lane_card_class(_count), do: "lane-card lane-card-active"
+
+  defp lane_card_class(0, extra_class), do: "lane-card #{extra_class}"
+  defp lane_card_class(_count, extra_class), do: "lane-card lane-card-active #{extra_class}"
 
   defp run_count(%{issues: issues}) when is_list(issues) do
     Enum.reduce(issues, 0, fn issue, acc -> acc + issue.run_count end)

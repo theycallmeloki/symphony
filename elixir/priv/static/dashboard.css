@@ -2517,6 +2517,52 @@ button.secondary:hover {
   padding: 0.85rem;
 }
 
+.driver-brief {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1.5fr) repeat(3, minmax(7rem, 1fr));
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: #0c100f;
+}
+
+.driver-brief-cell {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border-right: 1px solid var(--line);
+}
+
+.driver-brief-cell:last-child {
+  border-right: none;
+}
+
+.driver-brief-primary {
+  background: #101916;
+}
+
+.driver-brief-label {
+  color: #7f8a83;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.driver-brief strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.9rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.driver-brief-primary strong {
+  color: var(--accent-ink);
+}
+
 .phase-card,
 .seat-controls,
 .compose-form,
@@ -2696,6 +2742,153 @@ button.secondary:hover {
   border-top-color: #2a302d;
 }
 
+.harness-command {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid #333d38;
+  border-radius: 10px;
+  background: #111413;
+  box-shadow: var(--shadow-sm);
+}
+
+.harness-command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.harness-command-title {
+  margin: 0.2rem 0 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.operator-load {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-height: 2.4rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c100f;
+  color: var(--muted);
+}
+
+.operator-load-hot {
+  border-color: var(--amber-line);
+  background: #211b12;
+  color: var(--amber-ink);
+}
+
+.operator-load-value {
+  font-size: 1.35rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.operator-load-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.harness-lanes {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.lane-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.1rem 0.55rem;
+  align-items: baseline;
+  min-height: 4.25rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c100f;
+  color: var(--muted);
+}
+
+.lane-card-active {
+  border-color: rgba(40, 201, 155, 0.34);
+  background: #101916;
+}
+
+.lane-card-attention.lane-card-active {
+  border-color: var(--amber-line);
+  background: #1b1810;
+}
+
+.lane-card-danger.lane-card-active {
+  border-color: rgba(255, 141, 134, 0.42);
+  background: #211312;
+}
+
+.lane-kicker {
+  grid-column: 1 / -1;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #7f8a83;
+}
+
+.lane-value {
+  color: var(--ink);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.lane-card-active .lane-value {
+  color: var(--accent-ink);
+}
+
+.lane-card-attention.lane-card-active .lane-value {
+  color: var(--amber-ink);
+}
+
+.lane-card-danger.lane-card-active .lane-value {
+  color: var(--danger);
+}
+
+.lane-label {
+  min-width: 0;
+  color: #a7b0aa;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.harness-hints {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.harness-hints span {
+  padding: 0.26rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0c100f;
+}
+
+.harness-hints strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
 @media (max-width: 1180px) {
   .wb-body {
     grid-template-columns: 250px minmax(0, 1fr);
@@ -2703,6 +2896,10 @@ button.secondary:hover {
 
   .compose-grid {
     grid-template-columns: 1fr;
+  }
+
+  .harness-lanes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -2738,6 +2935,22 @@ button.secondary:hover {
 
   .thread-row {
     flex: 0 0 245px;
+  }
+
+  .harness-lanes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .driver-brief {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .driver-brief-cell:nth-child(2) {
+    border-right: none;
+  }
+
+  .driver-brief-cell:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
   }
 }
 
@@ -2780,5 +2993,35 @@ button.secondary:hover {
   .secondary-row button,
   .terminal-row button {
     flex: 1 1 auto;
+  }
+
+  .harness-command {
+    padding: 0.65rem;
+  }
+
+  .operator-load {
+    width: 100%;
+  }
+
+  .harness-lanes {
+    grid-template-columns: 1fr;
+  }
+
+  .lane-card {
+    min-height: 3.4rem;
+  }
+
+  .driver-brief {
+    grid-template-columns: 1fr;
+  }
+
+  .driver-brief-cell,
+  .driver-brief-cell:nth-child(2) {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .driver-brief-cell:last-child {
+    border-bottom: none;
   }
 }

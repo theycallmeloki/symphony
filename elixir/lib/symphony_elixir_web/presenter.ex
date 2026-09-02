@@ -3,7 +3,95 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, Workspace}
+  alias SymphonyElixir.{Config, Orchestrator, RunJournal, StatusDashboard, Workspace}
+
+  @spec runs_payload() :: map()
+  def runs_payload do
+    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    if RunJournal.enabled?() do
+      root = RunJournal.root()
+      issues = RunJournal.all_issues(root)
+
+      %{
+        generated_at: generated_at,
+        journal_root: root,
+        enabled: true,
+        issue_count: length(issues),
+        issues: issues
+      }
+    else
+      %{generated_at: generated_at, enabled: false, issue_count: 0, issues: []}
+    end
+  end
+
+  @spec issue_runs_payload(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def issue_runs_payload(issue_identifier) do
+    if RunJournal.enabled?() do
+      root = RunJournal.root()
+      events = RunJournal.issue_events(root, issue_identifier)
+
+      if events == [] do
+        {:error, :not_found}
+      else
+        runs =
+          events
+          |> Enum.map(& &1["run_index"])
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+          |> Enum.sort()
+          |> Enum.map(fn run_index ->
+            finished =
+              events
+              |> Enum.reverse()
+              |> Enum.find(&(&1["event"] == "run_finished" and &1["run_index"] == run_index))
+
+            transcript = RunJournal.transcript_events(root, issue_identifier, run_index)
+
+            %{
+              run_index: run_index,
+              started: Enum.find(events, &(&1["event"] == "run_started" and &1["run_index"] == run_index)),
+              finished: finished,
+              status: (finished && RunJournal.status_from_event(finished)) || "running",
+              transcript_event_count: length(transcript)
+            }
+          end)
+
+        {:ok,
+         %{
+           issue_identifier: issue_identifier,
+           run_count: length(runs),
+           runs: runs,
+           events: events,
+           transcript: last_transcript_tail(root, issue_identifier)
+         }}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  defp last_transcript_tail(root, issue_identifier) do
+    case RunJournal.issue_events(root, issue_identifier) do
+      [] ->
+        []
+
+      events ->
+        run_indexes =
+          events
+          |> Enum.map(& &1["run_index"])
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+
+        case Enum.max(run_indexes, fn -> nil end) do
+          nil ->
+            []
+
+          last_index ->
+            RunJournal.transcript_events(root, issue_identifier, last_index, 50)
+        end
+    end
+  end
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do

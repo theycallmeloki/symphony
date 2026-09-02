@@ -13,6 +13,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:payload, load_payload())
+      |> assign(:runs, load_runs())
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -34,6 +35,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:payload, load_payload())
+     |> assign(:runs, load_runs())
      |> assign(:now, DateTime.utc_now())}
   end
 
@@ -325,12 +327,79 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
       <% end %>
+
+      <section class="section-card">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">Run history</h2>
+            <p class="section-copy">
+              Durable journal of issue runs and agent sessions —
+              <%= @runs.issue_count %> issues tracked.
+            </p>
+          </div>
+        </div>
+
+        <%= if @runs.enabled and @runs.issues != [] do %>
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 820px;">
+              <colgroup>
+                <col style="width: 12rem;" />
+                <col style="width: 8rem;" />
+                <col style="width: 5rem;" />
+                <col style="width: 6rem;" />
+                <col style="width: 11rem;" />
+                <col />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Status</th>
+                  <th>Runs</th>
+                  <th>Events</th>
+                  <th>Last event</th>
+                  <th>Last at</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={run <- @runs.issues}>
+                  <td>
+                    <div class="issue-stack">
+                      <span class="issue-id"><%= run.issue_identifier %></span>
+                      <a
+                        class="issue-link"
+                        href={"/api/v1/issues/#{run.issue_identifier}/runs"}
+                      >history JSON</a>
+                    </div>
+                  </td>
+                  <td>
+                    <span class={run_status_badge_class(run.status)}>
+                      <%= run.status %>
+                    </span>
+                  </td>
+                  <td class="numeric"><%= run.run_count %></td>
+                  <td class="numeric"><%= run.event_count %></td>
+                  <td><%= run.last_event || "n/a" %></td>
+                  <td class="mono"><%= run.last_at || "n/a" %></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% else %>
+          <p class="empty-state">
+            <%= if @runs.enabled, do: "No journaled runs yet.", else: "Run journal disabled (observability.run_journal_enabled)." %>
+          </p>
+        <% end %>
+      </section>
     </section>
     """
   end
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+  end
+
+  defp load_runs do
+    Presenter.runs_payload()
   end
 
   defp orchestrator do
@@ -433,6 +502,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
       String.contains?(normalized, ["progress", "running", "active"]) -> "#{base} state-badge-active"
       String.contains?(normalized, ["blocked", "error", "failed"]) -> "#{base} state-badge-danger"
       String.contains?(normalized, ["todo", "queued", "pending", "retry"]) -> "#{base} state-badge-warning"
+      true -> base
+    end
+  end
+
+  defp run_status_badge_class(status) do
+    base = "state-badge"
+    normalized = status |> to_string() |> String.downcase()
+
+    cond do
+      normalized in ["running"] -> "#{base} state-badge-active"
+      normalized in ["done", "completed"] -> "#{base} state-badge-active"
+      normalized in ["failed", "blocked"] -> "#{base} state-badge-danger"
       true -> base
     end
   end

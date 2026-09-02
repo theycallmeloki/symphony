@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RunJournal, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -180,6 +180,8 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
+        journal_codex_update(updated_running_entry, update)
+
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -211,6 +213,8 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
+      journal_run_finished(running_entry, issue_id, "completed", %{})
+
       state
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
@@ -236,6 +240,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
+    journal_run_finished(running_entry, issue_id, "blocked", %{"error" => error})
+
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
@@ -243,6 +249,8 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
+
+    journal_run_finished(running_entry, issue_id, "failed", %{"error" => "agent exited: #{inspect(reason)}"})
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
@@ -959,29 +967,32 @@ defmodule SymphonyElixir.Orchestrator do
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
-          })
+        running_entry = %{
+          pid: pid,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          worker_host: worker_host,
+          workspace_path: nil,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          turn_count: 0,
+          retry_attempt: normalize_retry_attempt(attempt),
+          started_at: DateTime.utc_now()
+        }
+
+        journal_run_started(running_entry, issue)
+
+        running = Map.put(state.running, issue.id, running_entry)
 
         %{
           state
@@ -1116,6 +1127,8 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
+
+        journal_issue_terminal(issue_id, issue)
 
         cleanup_issue_workspace(issue, metadata)
         {:noreply, release_issue_claim(state, issue_id)}
@@ -1987,4 +2000,99 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integer_like(_value), do: nil
+
+  # ── Run journal (durable history + transcripts) ──────────────────────────
+
+  defp journal_run_started(running_entry, issue) do
+    if RunJournal.enabled?() do
+      RunJournal.record(
+        RunJournal.root(),
+        issue.identifier,
+        "run_started",
+        %{
+          "issue_id" => issue.id,
+          "run_index" => run_index_for(running_entry),
+          "attempt" => Map.get(running_entry, :retry_attempt, 0),
+          "worker_host" => Map.get(running_entry, :worker_host),
+          "pid" => inspect(Map.get(running_entry, :pid))
+        }
+      )
+    end
+
+    :ok
+  end
+
+  defp journal_run_finished(running_entry, issue_id, status, details) do
+    if RunJournal.enabled?() do
+      started_at = Map.get(running_entry, :started_at)
+      now = DateTime.utc_now()
+
+      duration_ms =
+        if is_struct(started_at, DateTime), do: DateTime.diff(now, started_at, :millisecond)
+
+      RunJournal.record(
+        RunJournal.root(),
+        running_entry.identifier,
+        "run_finished",
+        Map.merge(details, %{
+          "issue_id" => issue_id,
+          "run_index" => run_index_for(running_entry),
+          "status" => status,
+          "session_id" => Map.get(running_entry, :session_id),
+          "duration_ms" => duration_ms,
+          "tokens" => %{
+            "input" => Map.get(running_entry, :codex_input_tokens, 0),
+            "output" => Map.get(running_entry, :codex_output_tokens, 0),
+            "total" => Map.get(running_entry, :codex_total_tokens, 0)
+          }
+        })
+      )
+    end
+
+    :ok
+  end
+
+  defp journal_codex_update(running_entry, update) do
+    if RunJournal.enabled?() do
+      message =
+        case update do
+          %{payload: payload} -> payload
+          %{raw: raw} -> raw
+          _ -> nil
+        end
+
+      RunJournal.append_transcript(
+        RunJournal.root(),
+        running_entry.identifier,
+        run_index_for(running_entry),
+        %{
+          "issue_id" => running_entry.issue.id,
+          "event" => to_string(Map.get(update, :event)),
+          "session_id" => Map.get(update, :session_id),
+          "thread_id" => Map.get(update, :thread_id),
+          "turn_id" => Map.get(update, :turn_id),
+          "message" => message
+        }
+      )
+    end
+
+    :ok
+  end
+
+  defp run_index_for(running_entry) do
+    Map.get(running_entry, :retry_attempt, 0) + 1
+  end
+
+  defp journal_issue_terminal(issue_id, issue) do
+    if RunJournal.enabled?() do
+      RunJournal.record(
+        RunJournal.root(),
+        issue.identifier,
+        "issue_terminal",
+        %{"issue_id" => issue_id, "state" => issue.state}
+      )
+    end
+
+    :ok
+  end
 end

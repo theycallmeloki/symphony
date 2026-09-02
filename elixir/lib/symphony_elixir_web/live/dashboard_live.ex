@@ -6,6 +6,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
+
   @runtime_tick_ms 1_000
 
   @impl true
@@ -15,6 +16,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:payload, load_payload())
       |> assign(:runs, load_runs())
       |> assign(:now, DateTime.utc_now())
+      |> assign(:intents, load_intents())
+      |> assign(:intents_error, nil)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -36,7 +39,40 @@ defmodule SymphonyElixirWeb.DashboardLive do
      socket
      |> assign(:payload, load_payload())
      |> assign(:runs, load_runs())
+     |> assign(:intents, load_intents())
      |> assign(:now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_event("register_intent", params, socket) do
+    case SymphonyElixir.Intents.IntentStore.create_intent(params) do
+      {:ok, _intent} ->
+        {:noreply, assign(socket, :intents_error, nil)}
+
+      {:error, {:missing_field, field}} ->
+        {:noreply, assign(socket, :intents_error, "Missing required field: #{field}")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :intents_error, "Could not register intent: #{inspect(reason)}")}
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_intent", %{"id" => id}, socket) when is_binary(id) do
+    case SymphonyElixir.Intents.IntentStore.cancel_intent(id) do
+      {:ok, _intent} ->
+        {:noreply, assign(socket, :intents_error, nil)}
+
+      {:error, :invalid_state} ->
+        {:noreply, assign(socket, :intents_error, "Intent #{id} is already terminal.")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :intents_error, "Could not cancel intent #{id}: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("cancel_intent", _params, socket) do
+    {:noreply, assign(socket, :intents_error, "Missing intent id.")}
   end
 
   @impl true
@@ -331,6 +367,114 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <section class="section-card">
         <div class="section-header">
           <div>
+            <h2 class="section-title">Intents</h2>
+            <p class="section-copy">
+              Dashboard-registered job intents. Open intents are picked up by the
+              orchestrator and run as agent jobs; each run is journaled under the
+              intent id.
+            </p>
+          </div>
+        </div>
+
+        <form class="intent-form" phx-submit="register_intent">
+          <div class="intent-form-row">
+            <label class="intent-form-field intent-form-field-grow">
+              <span>Title</span>
+              <input class="intent-form-input" type="text" name="title" required placeholder="e.g. Publish release notes" />
+            </label>
+            <label class="intent-form-field intent-form-field-repo">
+              <span>Repo (optional)</span>
+              <input class="intent-form-input" type="text" name="repo" placeholder="milady/project" />
+            </label>
+            <label class="intent-form-field intent-form-field-labels">
+              <span>Labels (comma)</span>
+              <input class="intent-form-input" type="text" name="labels" placeholder="symphony-pilot, infra" />
+            </label>
+            <button class="primary-button" type="submit">Register intent</button>
+          </div>
+          <label class="intent-form-field">
+            <span>Description</span>
+            <textarea
+              class="intent-form-input"
+              name="description"
+              rows="2"
+              placeholder="What the agent should accomplish for this intent."
+            ></textarea>
+          </label>
+        </form>
+
+        <%= if @intents_error do %>
+          <p class="form-error"><%= @intents_error %></p>
+        <% end %>
+
+        <%= if @intents == [] do %>
+          <p class="empty-state">No intents registered yet.</p>
+        <% else %>
+          <div class="table-wrap">
+            <table class="data-table data-table-intents">
+              <thead>
+                <tr>
+                  <th>Intent</th>
+                  <th>State</th>
+                  <th>Repo</th>
+                  <th>Labels</th>
+                  <th>Outcome</th>
+                  <th>Updated</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={intent <- @intents}>
+                  <td>
+                    <div class="issue-stack">
+                      <span class="issue-id"><%= intent.id %></span>
+                      <span class="intent-title" title={intent.description || intent.title}><%= intent.title %></span>
+                      <a class="issue-link" href={"/api/v1/intents/#{intent.id}"}>JSON details</a>
+                    </div>
+                  </td>
+                  <td>
+                    <span class={intent_state_badge_class(intent.state)}>
+                      <%= intent.state %>
+                    </span>
+                  </td>
+                  <td><%= intent.repo || "n/a" %></td>
+                  <td>
+                    <span class="muted">
+                      <%= if intent.labels == [] do %>
+                        —
+                      <% else %>
+                        <%= Enum.join(intent.labels, ", ") %>
+                      <% end %>
+                    </span>
+                  </td>
+                  <td>
+                    <div class="detail-stack">
+                      <span class="event-text" title={intent_result_summary(intent)}>
+                        <%= intent_result_summary(intent) %>
+                      </span>
+                    </div>
+                  </td>
+                  <td class="mono"><%= intent.updated_at || "n/a" %></td>
+                  <td>
+                    <%= if intent.state in ["open", "running"] do %>
+                      <button
+                        type="button"
+                        class="subtle-button"
+                        phx-click="cancel_intent"
+                        phx-value-id={intent.id}
+                      >Cancel</button>
+                    <% end %>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </section>
+
+      <section class="section-card">
+        <div class="section-header">
+          <div>
             <h2 class="section-title">Run history</h2>
             <p class="section-copy">
               Durable journal of issue runs and agent sessions —
@@ -401,6 +545,47 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp load_runs do
     Presenter.runs_payload()
   end
+
+  defp load_intents do
+    case SymphonyElixir.Intents.IntentStore.list_intents() do
+      {:ok, intents} -> intents
+      {:error, _reason} -> []
+    end
+  end
+
+  defp intent_state_badge_class(state) do
+    base = "state-badge"
+    normalized = state |> to_string() |> String.downcase()
+
+    cond do
+      normalized in ["running", "open"] -> "#{base} state-badge-active"
+      normalized in ["done", "completed"] -> "#{base} state-badge-done"
+      normalized in ["failed", "blocked", "cancelled"] -> "#{base} state-badge-danger"
+      true -> base
+    end
+  end
+
+  defp intent_result_summary(%{state: state, result: result}) when is_map(result) do
+    status = Map.get(result, "status") || Map.get(result, :status)
+
+    cond do
+      is_binary(status) and status == "completed" -> "run completed"
+      is_binary(status) and status == "blocked" -> "blocked"
+      is_binary(status) and status == "failed" -> "run failed"
+      state == "cancelled" -> "cancelled"
+      true -> ""
+    end
+  end
+
+  defp intent_result_summary(%{state: state}) when state in ["open", "running"] do
+    case state do
+      "running" -> "in flight"
+      _ -> "waiting for dispatch"
+    end
+  end
+
+  defp intent_result_summary(%{state: "cancelled"}), do: "cancelled"
+  defp intent_result_summary(_intent), do: ""
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator

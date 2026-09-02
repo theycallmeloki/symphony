@@ -214,6 +214,7 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
       journal_run_finished(running_entry, issue_id, "completed", %{})
+      Tracker.notify_run_finished(issue_id, "completed", %{})
 
       state
       |> complete_issue(issue_id)
@@ -241,6 +242,7 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
     journal_run_finished(running_entry, issue_id, "blocked", %{"error" => error})
+    Tracker.notify_run_finished(issue_id, "blocked", %{"error" => error})
 
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
@@ -251,6 +253,7 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = next_retry_attempt_from_running(running_entry)
 
     journal_run_finished(running_entry, issue_id, "failed", %{"error" => "agent exited: #{inspect(reason)}"})
+    Tracker.notify_run_finished(issue_id, "failed", %{"error" => "agent exited: #{inspect(reason)}"})
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,

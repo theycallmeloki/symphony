@@ -16,7 +16,8 @@ defmodule SymphonyElixir.Tracker do
     "gitlab" => SymphonyElixir.GitLab.Adapter,
     "jira" => SymphonyElixir.Jira.Adapter,
     "linear" => SymphonyElixir.Linear.Adapter,
-    "memory" => SymphonyElixir.Tracker.Memory
+    "memory" => SymphonyElixir.Tracker.Memory,
+    "redka" => SymphonyElixir.Tracker.Redka
   }
 
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -24,10 +25,13 @@ defmodule SymphonyElixir.Tracker do
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
+  @callback notify_run_finished(String.t(), String.t(), map()) :: :ok
   @callback validate_config(map()) :: :ok | {:error, term()}
 
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
+                      secret_environment_names: 1,
+                      notify_run_finished: 3,
                       validate_config: 1
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -81,6 +85,25 @@ defmodule SymphonyElixir.Tracker do
       else
         :ok
       end
+    end
+  end
+
+  @doc """
+  Notifies the tracker adapter that an agent run finished for `issue_id`.
+
+  Adapters use this to move provider-side state to a terminal condition when
+  the orchestrator (not the agent) closes a run — e.g. intent-backed jobs.
+  Adapters without a `notify_run_finished/3` implementation are skipped.
+  """
+  @spec notify_run_finished(String.t(), String.t(), map()) :: :ok
+  def notify_run_finished(issue_id, status, details)
+      when is_binary(issue_id) and is_binary(status) and is_map(details) do
+    adapter = adapter()
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :notify_run_finished, 3) do
+      adapter.notify_run_finished(issue_id, status, details)
+    else
+      :ok
     end
   end
 

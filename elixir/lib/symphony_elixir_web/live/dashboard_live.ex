@@ -999,7 +999,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= if @thread == nil do %>
             <.compose_hero tracked_repos={@tracked_repos} />
           <% else %>
-            <.driver_seat thread={@thread} detail={@detail} phase={@phase} verifications={@verifications} dirty_files={@dirty_files} now={@now} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} />
+            <.driver_seat thread={@thread} detail={@detail} phase={@phase} verifications={@verifications} dirty_files={@dirty_files} built_head={@built_head} now={@now} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} />
           <% end %>
         </section>
       </div>
@@ -1179,6 +1179,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:phase, :map, default: nil)
   attr(:verifications, :list, default: [])
   attr(:dirty_files, :list, default: nil)
+  attr(:built_head, :string, default: nil)
   attr(:expanded_run, :integer, default: nil)
   attr(:expanded_transcript, :list, default: [])
   attr(:now, :map, required: true)

@@ -179,12 +179,13 @@ defmodule SymphonyElixir.RepoDelta do
           {:ok, %{status: 200}} ->
             Logger.info("RepoDelta delivered #{map_size(files)} changed / #{length(deleted)} deleted repo=#{repo}")
 
-            # The receiver recorded `revision` (our git HEAD) as the new
-            # head marker, so the workspace can keep producing deltas: fold
-            # the delivered state into a new base commit and re-point the
-            # marker at the delivered revision. Best effort — a failure
-            # only means a later emit would carry a stale base.
-            commit_after_emit(workspace, revision)
+            # The receiver recorded `head` (our git HEAD, the payload's
+            # revision) as the new head marker, so the workspace can keep
+            # producing deltas: fold the delivered state into a new base
+            # commit and re-point the marker at the delivered revision.
+            # Best effort — a failure only means a later emit would carry
+            # a stale base.
+            commit_after_emit(workspace, head)
 
             {:ok, :delivered}
 

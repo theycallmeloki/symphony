@@ -324,12 +324,11 @@ defmodule SymphonyElixir.RepoDelta do
   # marker file invisible to future deltas (appended to .gitignore).
   defp init_git_checkout(workspace, repo, revision) do
     with :ok <- ignore_marker(workspace),
-         :ok <- git_ok(workspace, ["init", "-q"]),
-         :ok <- git_ok(workspace, ["config", "user.name", "Sandman Mirror"]),
-         :ok <- git_ok(workspace, ["config", "user.email", "sandman@mirror.local"]),
-         :ok <- git_ok(workspace, ["add", "-A"]),
-         {:ok, _} <-
-           git_ok(workspace, ["commit", "-q", "-m", "materialized #{repo} @ #{revision}"]) do
+         {:ok, _} <- git_ok(workspace, ["init", "-q"]),
+         {:ok, _} <- git_ok(workspace, ["config", "user.name", "Sandman Mirror"]),
+         {:ok, _} <- git_ok(workspace, ["config", "user.email", "sandman@mirror.local"]),
+         {:ok, _} <- git_ok(workspace, ["add", "-A"]),
+         {:ok, _} <- git_ok(workspace, ["commit", "-q", "-m", "materialized #{repo} @ #{revision}"]) do
       :ok
     else
       {:error, reason} -> {:error, reason}

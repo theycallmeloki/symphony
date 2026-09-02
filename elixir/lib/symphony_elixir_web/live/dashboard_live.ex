@@ -1397,6 +1397,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <div class="issue-stack">
                           <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
                           <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                          <%= if entry.session_id do %>
+                            <button
+                              type="button"
+                              class="subtle-button"
+                              data-label="Copy ID"
+                              data-copy={entry.session_id}
+                              onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                            >
+                              Copy ID
+                            </button>
+                          <% else %>
+                            <span class="muted">n/a</span>
+                          <% end %>
                         </div>
                       </td>
                       <td>

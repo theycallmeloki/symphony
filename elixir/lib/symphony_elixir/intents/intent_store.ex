@@ -176,14 +176,16 @@ defmodule SymphonyElixir.Intents.IntentStore do
         :ok
 
       :redka ->
-        command([
-          "HSET",
-          intent_key(intent.id),
-          Enum.flat_map(fields, fn {key, value} -> [to_string(key), value] end)
-        ])
-        |> case do
+        hset_args =
+          ["HSET", intent_key(intent.id)] ++
+            Enum.flat_map(fields, fn {key, value} -> [to_string(key), store_value(value)] end)
+
+        case command(hset_args) do
           {:ok, _} ->
-            command(["SADD", ids_key(), intent.id])
+            case command(["SADD", ids_key(), intent.id]) do
+              {:ok, _} -> :ok
+              error -> error
+            end
 
           error ->
             error
@@ -229,7 +231,7 @@ defmodule SymphonyElixir.Intents.IntentStore do
   defp command(args) do
     case Process.whereis(SymphonyElixir.Intents.RedkaConn) do
       pid when is_pid(pid) ->
-        Redix.command(pid, args, timeout: 5_000)
+        GenServer.call(pid, {:command, args}, 10_000)
 
       _ ->
         {:error, :redka_unavailable}
@@ -275,4 +277,8 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   defp intent_sort_key(%Intent{}), do: DateTime.from_unix!(0)
+
+  defp store_value(nil), do: ""
+  defp store_value(value) when is_binary(value), do: value
+  defp store_value(value), do: to_string(value)
 end

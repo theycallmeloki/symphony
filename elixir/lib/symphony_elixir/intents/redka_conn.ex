@@ -4,7 +4,9 @@ defmodule SymphonyElixir.Intents.RedkaConn do
 
   Connects lazily and keeps retrying so symphony can start before redka is
   ready; store calls return `{:error, :redka_unavailable}` until the
-  connection is up.
+  connection is up. Redix is configured with `exit_on_disconnection: false`
+  so connection loss does not kill the owning process — the next reconnect
+  attempt re-establishes it.
   """
 
   use GenServer
@@ -26,8 +28,34 @@ defmodule SymphonyElixir.Intents.RedkaConn do
   end
 
   @impl true
+  def handle_call({:command, args}, _from, %{conn: conn} = state) when is_list(args) do
+    case conn do
+      nil ->
+        {:reply, {:error, :redka_unavailable}, state}
+
+      pid when is_pid(pid) ->
+        result =
+          try do
+            Redix.command(pid, args, timeout: 5_000)
+          rescue
+            _exception -> {:error, :redka_unavailable}
+          end
+
+        {:reply, result, state}
+    end
+  end
+
+  def handle_call({:command, _args}, _from, state) do
+    {:reply, {:error, :invalid_command}, state}
+  end
+
+  @impl true
   def handle_info(:connect, %{conn: nil} = state) do
-    case Redix.start_link(state.url, sync_connect: false, exit_on_close: false) do
+    case Redix.start_link(state.url,
+           sync_connect: false,
+           exit_on_disconnection: false,
+           name: nil
+         ) do
       {:ok, pid} ->
         Logger.info("IntentStore redka connection established url=#{state.url}")
         {:noreply, %{state | conn: pid}}

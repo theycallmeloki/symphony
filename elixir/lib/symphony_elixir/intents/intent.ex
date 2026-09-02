@@ -84,17 +84,21 @@ defmodule SymphonyElixir.Intents.Intent do
   @spec to_store(t()) :: map()
   def to_store(%Intent{} = intent) do
     %{
-      "id" => intent.id,
-      "title" => intent.title,
-      "description" => intent.description,
-      "state" => intent.state,
-      "repo" => intent.repo,
+      "id" => store_value(intent.id),
+      "title" => store_value(intent.title),
+      "description" => store_value(intent.description),
+      "state" => store_value(intent.state),
+      "repo" => store_value(intent.repo),
       "labels" => Jason.encode!(intent.labels || []),
       "result" => encode_json_map(intent.result),
-      "created_at" => intent.created_at,
-      "updated_at" => intent.updated_at
+      "created_at" => store_value(intent.created_at),
+      "updated_at" => store_value(intent.updated_at)
     }
   end
+
+  defp store_value(nil), do: ""
+  defp store_value(value) when is_binary(value), do: value
+  defp store_value(value), do: to_string(value)
 
   @spec valid_state?(String.t()) :: boolean()
   def valid_state?(state) when is_binary(state) do

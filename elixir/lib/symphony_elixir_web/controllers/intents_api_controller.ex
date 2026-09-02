@@ -137,6 +137,32 @@ defmodule SymphonyElixirWeb.IntentsApiController do
   defp to_atom(key) when is_atom(key), do: key
   defp to_atom(key) when is_binary(key), do: String.to_atom(key)
 
+  @doc """
+  Dry-run workspace-diff listing: the parked workspace's un-committed
+  edit paths vs its git HEAD (names only — nothing is emitted or read
+  beyond the path list). `200` with `{"paths": [...]}` (empty array when
+  clean), `409` when the thread has no parked workspace.
+  """
+  @spec dirty(Conn.t(), map()) :: Conn.t()
+  def dirty(conn, %{"intent_id" => intent_id}) do
+    case SymphonyElixir.Deployer.dirty_files(intent_id) do
+      {:ok, paths} ->
+        json(conn, %{intent_id: intent_id, paths: paths, dirty: length(paths)})
+
+      {:error, :not_found} ->
+        error_response(conn, 404, :not_found, "Intent not found")
+
+      {:error, :no_parked_workspace} ->
+        error_response(conn, 409, :no_parked_workspace, "No parked agent workspace for this thread")
+
+      {:error, :workspace_missing} ->
+        error_response(conn, 409, :workspace_missing, "Parked workspace no longer exists")
+
+      {:error, reason} ->
+        error_response(conn, 422, :dirty_unavailable, "Dirty listing unavailable: #{inspect(reason)}")
+    end
+  end
+
   @spec close(Conn.t(), map()) :: Conn.t()
   def close(conn, %{"intent_id" => intent_id}) do
     case IntentStore.close_intent(intent_id) do

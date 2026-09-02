@@ -3057,3 +3057,47 @@ button.secondary:hover {
     border-bottom: none;
   }
 }
+
+
+/* workspace-edits dry-run block (driver seat) */
+.dirty-block {
+  margin-top: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #101413;
+  padding: 0.75rem 0.9rem;
+}
+
+.dirty-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.dirty-head .queue-title {
+  margin: 0;
+}
+
+.dirty-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  max-height: 11rem;
+  overflow-y: auto;
+}
+
+.dirty-list li {
+  font-size: 0.8rem;
+  color: #d3d9d4;
+  padding: 0.14rem 0.45rem;
+  border-left: 2px solid var(--accent);
+  background: rgba(40, 201, 155, 0.05);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

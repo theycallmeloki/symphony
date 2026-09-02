@@ -54,17 +54,37 @@ defmodule SymphonyElixir.Deployer do
     state == "awaiting" and is_binary(repo) and repo != ""
   end
 
-  defp fetch_awaiting(intent_id) do
+  @doc """
+  The parked workspace's un-committed edit paths — the dry-run view for
+  the driver-seat dirty-file list. Reads names only (no content, nothing
+  emitted). `{:ok, paths}` for a parked workspace, `{:ok, []}` when the
+  tree is clean, or `{:error, reason}` when the thread has no parked
+  workspace or the workspace is not a bootstrapped git checkout.
+  """
+  @spec dirty_files(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def dirty_files(intent_id) when is_binary(intent_id) do
+    with {:ok, %Intent{} = intent} <- fetch_intent(intent_id),
+         {:ok, workspace} <- parked_workspace(intent) do
+      RepoDelta.dirty_paths(workspace)
+    end
+  end
+
+  defp fetch_intent(intent_id) do
     case IntentStore.get_intent(intent_id) do
+      {:ok, %Intent{} = intent} -> {:ok, intent}
+      {:error, :not_found} = error -> error
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_awaiting(intent_id) do
+    case fetch_intent(intent_id) do
       {:ok, %Intent{} = intent} ->
         if intent.state == "awaiting" do
           {:ok, intent}
         else
           {:error, {:invalid_state, intent.state}}
         end
-
-      {:error, :not_found} = error ->
-        error
 
       {:error, reason} ->
         {:error, reason}

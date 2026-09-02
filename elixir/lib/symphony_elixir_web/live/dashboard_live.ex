@@ -67,6 +67,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:detail, nil)
       |> assign(:phase, nil)
       |> assign(:verifications, [])
+      |> assign(:dirty_files, nil)
       |> assign(:expanded_run, nil)
       |> assign(:expanded_transcript, [])
       |> assign(:tracked_repos, load_tracked_repos())
@@ -476,12 +477,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     case socket.assigns.selected do
       nil ->
-        assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], expanded_run: nil, expanded_transcript: [])
+        assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, expanded_run: nil, expanded_transcript: [])
 
       id ->
         case Enum.find(intents, &(&1.id == id and &1.verify_for == nil)) do
           nil ->
-            assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], expanded_run: nil, expanded_transcript: [])
+            assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], dirty_files: nil, expanded_run: nil, expanded_transcript: [])
 
           thread ->
             verifications = verification_intents(intents, id)
@@ -503,7 +504,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  # Journal detail + phase + expanded transcript, re-read from disk.
+  # Journal detail + phase + expanded transcript, re-read from disk. The
+  # dirty-file dry-run list (workspace edits vs git HEAD, names only) is
+  # recomputed while a thread sits parked on ask-satisfied — the state
+  # where the deploy decision needs it; elsewhere the previous value
+  # stands until the next transition or tick.
   defp refresh_journal(socket) do
     case socket.assigns.thread do
       nil ->
@@ -511,13 +516,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
       thread ->
         detail = issue_detail_payload(thread.id)
+        dirty = dirty_files_for(thread)
 
         socket
-        |> assign(detail: detail)
+        |> assign(detail: detail, dirty_files: dirty)
         |> refresh_phase()
         |> refresh_expanded_transcript()
     end
   end
+
+  defp dirty_files_for(%{state: "awaiting", id: id}) do
+    case SymphonyElixir.Deployer.dirty_files(id) do
+      {:ok, paths} -> paths
+      _ -> nil
+    end
+  end
+
+  defp dirty_files_for(_thread), do: nil
 
   defp maybe_refresh_detail(socket), do: refresh_journal(socket)
 
@@ -781,6 +796,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp detail_run_count(%{runs: runs}) when is_list(runs), do: length(runs)
   defp detail_run_count(_detail), do: 0
 
+  defp dirty_edit_count(files) when is_list(files), do: length(files)
+  defp dirty_edit_count(_files), do: "—"
+
   # ── Render ──────────────────────────────────────────────────────────────
 
   @impl true
@@ -923,7 +941,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= if @thread == nil do %>
             <.compose_hero tracked_repos={@tracked_repos} />
           <% else %>
-            <.driver_seat thread={@thread} detail={@detail} phase={@phase} verifications={@verifications} now={@now} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} />
+            <.driver_seat thread={@thread} detail={@detail} phase={@phase} verifications={@verifications} dirty_files={@dirty_files} now={@now} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} />
           <% end %>
         </section>
       </div>
@@ -1102,6 +1120,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:detail, :map, default: nil)
   attr(:phase, :map, default: nil)
   attr(:verifications, :list, default: [])
+  attr(:dirty_files, :list, default: nil)
   attr(:expanded_run, :integer, default: nil)
   attr(:expanded_transcript, :list, default: [])
   attr(:now, :map, required: true)
@@ -1153,6 +1172,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <div class="driver-brief-cell">
         <span class="driver-brief-label">Verifications</span>
         <strong class="numeric"><%= length(@verifications) %></strong>
+      </div>
+      <div class="driver-brief-cell">
+        <span class="driver-brief-label">Edits</span>
+        <strong class="numeric"><%= dirty_edit_count(@dirty_files) %></strong>
       </div>
     </div>
 
@@ -1211,6 +1234,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
 
       <.seat_controls thread={@thread} phase={@phase} />
+      <%= if is_list(@dirty_files) and @dirty_files != [] do %>
+        <div class="dirty-block">
+          <div class="dirty-head">
+            <h3 class="queue-title">Workspace edits</h3>
+            <span class="muted numeric"><%= length(@dirty_files) %> file<%= if length(@dirty_files) == 1, do: "", else: "s" %> — not yet deployed</span>
+          </div>
+          <ul class="dirty-list">
+            <li :for={path <- @dirty_files} class="mono"><%= path %></li>
+          </ul>
+        </div>
+      <% end %>
 
       <div class="verifications-block">
         <h3 class="queue-title">Verification passes</h3>

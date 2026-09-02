@@ -45,6 +45,7 @@ defmodule SymphonyElixirWeb.Router do
     post("/api/v1/intents", IntentsApiController, :create)
     match(:*, "/api/v1/intents", IntentsApiController, :method_not_allowed)
     get("/api/v1/intents/:intent_id", IntentsApiController, :show)
+    get("/api/v1/intents/:intent_id/dirty", IntentsApiController, :dirty)
     post("/api/v1/intents/:intent_id/cancel", IntentsApiController, :cancel)
     post("/api/v1/intents/:intent_id/activate", IntentsApiController, :activate)
     post("/api/v1/intents/:intent_id/assign", IntentsApiController, :assign)

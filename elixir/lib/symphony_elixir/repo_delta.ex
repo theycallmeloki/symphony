@@ -503,6 +503,30 @@ defmodule SymphonyElixir.RepoDelta do
   end
 
   @doc """
+  Lists the workspace's un-committed edit paths vs its git HEAD —
+  changed, added, deleted, and untracked — WITHOUT reading file
+  contents: the dry-run view the dashboard's dirty-file list needs.
+  Sorted, de-duplicated, `{:ok, []}` for a clean tree. Errors when the
+  workspace is not a git checkout (a workspace that was never
+  bootstrapped has no HEAD to diff against).
+  """
+  @spec dirty_paths(Path.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def dirty_paths(workspace) do
+    with {:ok, changed} <-
+           git_ok(workspace, ["diff", "--name-only", "--no-renames", "HEAD"]),
+         {:ok, untracked} <-
+           git_ok(workspace, ["ls-files", "--others", "--exclude-standard"]) do
+      paths =
+        (String.split(changed, "\n", trim: true) ++
+           String.split(untracked, "\n", trim: true))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      {:ok, paths}
+    end
+  end
+
+  @doc """
   Parses `git diff --name-status -z` output into changed-file contents and
   removed paths. Exposed for tests: pure given the output and a
   workspace-backed reader.

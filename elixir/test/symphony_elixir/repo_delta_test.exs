@@ -128,6 +128,39 @@ defmodule SymphonyElixir.RepoDeltaTest do
     end
   end
 
+  describe "dirty_paths/1" do
+    test "lists changed, added, deleted, and untracked paths by name only" do
+      dir = tmp_workspace()
+      git(dir, ["init", "-q"])
+      git(dir, ["config", "user.name", "Test"])
+      git(dir, ["config", "user.email", "test@example.com"])
+
+      File.write!(Path.join(dir, "keep.txt"), "base\n")
+      File.write!(Path.join(dir, "edit.txt"), "base\n")
+      File.write!(Path.join(dir, "gone.txt"), "base\n")
+      git(dir, ["add", "-A"])
+      git(dir, ["commit", "-q", "-m", "base"])
+
+      # the agent's un-committed edits: modified, deleted, new, untracked
+      File.write!(Path.join(dir, "edit.txt"), "changed\n")
+      File.rm(Path.join(dir, "gone.txt"))
+      File.write!(Path.join(dir, "added.txt"), "new\n")
+
+      assert {:ok, paths} = RepoDelta.dirty_paths(dir)
+      assert paths == ["added.txt", "edit.txt", "gone.txt"]
+
+      # a clean tree lists nothing
+      git(dir, ["add", "-A"])
+      git(dir, ["commit", "-q", "-m", "fold"])
+      assert {:ok, []} = RepoDelta.dirty_paths(dir)
+    end
+
+    test "a non-git workspace reports an error" do
+      dir = tmp_workspace()
+      assert {:error, _} = RepoDelta.dirty_paths(dir)
+    end
+  end
+
   defp tmp_workspace do
     dir = Path.join(System.tmp_dir!(), "repo_delta_test_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)

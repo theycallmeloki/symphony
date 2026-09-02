@@ -76,6 +76,13 @@ defmodule SymphonyElixir.RepoDelta do
         Logger.warning("RepoDelta bootstrap skipped #{issue_log(issue)} reason=#{inspect(reason)}")
         :ok
     end
+  rescue
+    error ->
+      Logger.error(
+        "RepoDelta bootstrap crashed #{issue_log(issue)} error=#{Exception.message(error)}"
+      )
+
+      :ok
   end
 
   @doc """
@@ -91,6 +98,10 @@ defmodule SymphonyElixir.RepoDelta do
         Logger.warning("RepoDelta emit skipped #{issue_log(issue)} reason=#{inspect(reason)}")
         :ok
     end
+  rescue
+    error ->
+      Logger.error("RepoDelta emit crashed #{issue_log(issue)} error=#{Exception.message(error)}")
+      :ok
   end
 
   @doc """

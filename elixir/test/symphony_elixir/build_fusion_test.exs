@@ -102,7 +102,7 @@ defmodule SymphonyElixir.BuildFusionTest do
     refute again.job_done
   end
 
-  test "journals job_finished for an unseen terminal job and marks the entry done" do
+  test "journals job_started + job_finished for an unseen terminal job (first sighting raced the poll)" do
     {journal_fn, calls} = journal_harness()
 
     {updated, journaled} =
@@ -112,13 +112,19 @@ defmodule SymphonyElixir.BuildFusionTest do
         journal_fn
       )
 
-    assert journaled == ["job_finished"]
-    assert [{"job_finished", payload}] = calls.()
-    assert payload["job_id"] == "j1"
-    assert payload["pipeline"] == @watch
-    assert payload["state"] == "success"
-    assert payload["repo"] == @repo
-    assert payload["head"] == @head
+    assert journaled == ["job_started", "job_finished"]
+
+    assert [{"job_started", started}, {"job_finished", finished}] = calls.()
+    assert started["job_id"] == "j1"
+    assert started["pipeline"] == @watch
+    assert started["state"] == "success"
+    assert started["repo"] == @repo
+    assert started["head"] == @head
+    assert finished["job_id"] == "j1"
+    assert finished["pipeline"] == @watch
+    assert finished["state"] == "success"
+    assert finished["repo"] == @repo
+    assert finished["head"] == @head
 
     refute updated == nil
     assert updated.job_done

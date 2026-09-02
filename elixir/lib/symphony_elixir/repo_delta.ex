@@ -179,6 +179,13 @@ defmodule SymphonyElixir.RepoDelta do
           {:ok, %{status: 200}} ->
             Logger.info("RepoDelta delivered #{map_size(files)} changed / #{length(deleted)} deleted repo=#{repo}")
 
+            # The receiver recorded `revision` (our git HEAD) as the new
+            # head marker, so the workspace can keep producing deltas: fold
+            # the delivered state into a new base commit and re-point the
+            # marker at the delivered revision. Best effort — a failure
+            # only means a later emit would carry a stale base.
+            commit_after_emit(workspace, revision)
+
             {:ok, :delivered}
 
           {:ok, %{status: status, body: body}} ->
@@ -363,6 +370,43 @@ defmodule SymphonyElixir.RepoDelta do
     else
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Folds the workspace's delivered edits into a new base commit and
+  re-points the `.sandman-src` marker at the delivered revision, so the
+  next `emit_delta` diffs only the edits made since this delivery and
+  carries the base the receiver now records. Runs after every successful
+  delivery; best effort (never raises).
+  """
+  @spec commit_after_emit(Path.t(), String.t()) :: :ok
+  def commit_after_emit(workspace, delivered_revision) when is_binary(delivered_revision) do
+    with {:ok, %{"url" => repo, "branch" => branch}} <- read_marker(workspace),
+         {:ok, _} <- git_ok(workspace, ["add", "-A"]),
+         {:ok, _} <-
+           git_ok(workspace, [
+             "commit",
+             "-q",
+             "-m",
+             "post-delta snapshot #{delivered_revision}"
+           ]),
+         :ok <- write_marker(workspace, repo, delivered_revision) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "RepoDelta commit_after_emit skipped workspace=#{workspace} reason=#{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "RepoDelta commit_after_emit crashed workspace=#{workspace} error=#{Exception.message(error)}"
+      )
+
+      :ok
   end
 
   defp ignore_marker(workspace) do

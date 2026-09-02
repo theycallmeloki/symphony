@@ -8,13 +8,27 @@ defmodule SymphonyElixir.TrackedReposTest do
       repos = [%{"name" => "zeta"}, %{"name" => "alpha"}]
 
       pipelines = [
-        %{"name" => "zeta-watch", "state" => "running"},
+        %{
+          "name" => "zeta-watch",
+          "state" => "running",
+          "input" => %{"git" => %{"url" => "https://example.com/zeta.git"}}
+        },
         %{"name" => "alpha-watch", "state" => "success"}
       ]
 
       assert TrackedRepos.reconcile(repos, pipelines) == [
-               %{repo: "alpha", watch_pipeline: "alpha-watch", watch_state: "success"},
-               %{repo: "zeta", watch_pipeline: "zeta-watch", watch_state: "running"}
+               %{
+                 repo: "alpha",
+                 git_url: nil,
+                 watch_pipeline: "alpha-watch",
+                 watch_state: "success"
+               },
+               %{
+                 repo: "zeta",
+                 git_url: "https://example.com/zeta.git",
+                 watch_pipeline: "zeta-watch",
+                 watch_state: "running"
+               }
              ]
     end
 
@@ -23,7 +37,7 @@ defmodule SymphonyElixir.TrackedReposTest do
       pipelines = [%{"name" => "tracked-watch", "state" => "queued"}]
 
       assert TrackedRepos.reconcile(repos, pipelines) == [
-               %{repo: "tracked", watch_pipeline: "tracked-watch", watch_state: "queued"}
+               %{repo: "tracked", git_url: nil, watch_pipeline: "tracked-watch", watch_state: "queued"}
              ]
     end
 
@@ -36,7 +50,7 @@ defmodule SymphonyElixir.TrackedReposTest do
       ]
 
       assert TrackedRepos.reconcile(repos, pipelines) == [
-               %{repo: "dup", watch_pipeline: "dup-watch", watch_state: "running"}
+               %{repo: "dup", git_url: nil, watch_pipeline: "dup-watch", watch_state: "running"}
              ]
     end
 
@@ -53,7 +67,7 @@ defmodule SymphonyElixir.TrackedReposTest do
       pipelines = [%{"name" => "alpha-watch"}]
 
       assert TrackedRepos.reconcile(repos, pipelines) == [
-               %{repo: "alpha", watch_pipeline: "alpha-watch", watch_state: nil}
+               %{repo: "alpha", git_url: nil, watch_pipeline: "alpha-watch", watch_state: nil}
              ]
     end
   end

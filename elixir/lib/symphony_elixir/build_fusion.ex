@@ -297,7 +297,11 @@ defmodule SymphonyElixir.BuildFusion do
         {%{entry | job_done: true}, events}
 
       terminal? and not seen? ->
-        # First sighting is already terminal: finish directly, no job_started.
+        # First sighting is already terminal: the watch job raced past the
+        # poll interval. Record the start (observed state) so the timeline
+        # always reads started -> finished, then finish it once.
+        events = journal_event(journal_fn, "job_started", job_payload(entry, job), events)
+
         events = journal_event(journal_fn, "job_finished", job_payload(entry, job), events)
         {%{entry | jobs: MapSet.put(entry.jobs, id), job_done: true}, events}
 

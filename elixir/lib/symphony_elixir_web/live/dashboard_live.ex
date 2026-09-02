@@ -462,9 +462,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 type="button"
                 class="queue-chip"
                 phx-click="queue_tracked_repo"
-                phx-value-repo={tracked.repo}
+                phx-value-repo={tracked.git_url || tracked.repo}
                 phx-value-state={tracked.watch_state}
-                title={"Queue a repo job against #{tracked.repo} (watch pipeline #{tracked.watch_pipeline} — #{tracked.watch_state})"}
+                title={"Queue a repo job against #{tracked.repo} (#{tracked.git_url || tracked.repo}; watch pipeline #{tracked.watch_pipeline} — #{tracked.watch_state})"}
               >
                 <span><%= tracked.repo %></span>
                 <span class="chip-count"><%= tracked.watch_state %></span>

@@ -20,6 +20,7 @@ defmodule SymphonyElixir.TrackedRepos do
 
   @type tracked_repo :: %{
           repo: String.t(),
+          git_url: String.t() | nil,
           watch_pipeline: String.t(),
           watch_state: String.t() | nil
         }
@@ -59,26 +60,46 @@ defmodule SymphonyElixir.TrackedRepos do
 
   A repo is tracked when some pipeline in `pipelines` is named
   `repo <> "-watch"`. When several pipelines share a watch name the first
-  one's state is kept; a pipeline without a `state` yields `watch_state:
-  nil`.
+  one wins; a pipeline without a `state` yields `watch_state: nil`. Each
+  tracked repo also carries the binding git clone URL from its watch
+  pipeline's input (`input.git.url`) when the pipeline declares one —
+  dashboard launches queue that URL so emitted deltas match the binding —
+  and `nil` otherwise.
   """
   @spec reconcile([map()], [map()]) :: [tracked_repo()]
   def reconcile(repos, pipelines) do
-    states =
+    by_name =
       Enum.reduce(pipelines, %{}, fn %{"name" => name} = pipeline, acc ->
-        Map.put_new(acc, name, pipeline["state"])
+        Map.put_new(acc, name, pipeline)
       end)
 
     repos
     |> Enum.flat_map(fn %{"name" => repo} ->
       watch = repo <> "-watch"
 
-      case Map.fetch(states, watch) do
-        {:ok, state} -> [%{repo: repo, watch_pipeline: watch, watch_state: state}]
-        :error -> []
+      case Map.fetch(by_name, watch) do
+        {:ok, pipeline} ->
+          [
+            %{
+              repo: repo,
+              git_url: binding_git_url(pipeline),
+              watch_pipeline: watch,
+              watch_state: pipeline["state"]
+            }
+          ]
+
+        :error ->
+          []
       end
     end)
     |> Enum.sort_by(& &1.repo)
+  end
+
+  defp binding_git_url(pipeline) do
+    case pipeline do
+      %{"input" => %{"git" => %{"url" => url}}} when is_binary(url) and url != "" -> url
+      _ -> nil
+    end
   end
 
   defp fetch_pipelines(base, repos) do

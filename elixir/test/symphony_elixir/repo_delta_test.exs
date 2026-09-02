@@ -88,9 +88,54 @@ defmodule SymphonyElixir.RepoDeltaTest do
     end
   end
 
+  describe "commit_after_emit/2" do
+    test "folds delivered edits into a new base commit and re-points the marker" do
+      dir = tmp_workspace()
+      git(dir, ["init", "-q"])
+      git(dir, ["config", "user.name", "Test"])
+      git(dir, ["config", "user.email", "test@example.com"])
+
+      marker = Path.join(dir, ".sandman-src")
+      File.write!(marker, Jason.encode!(%{"url" => "https://github.com/theycallmeloki/sandman.git", "branch" => "master", "revision" => "base1"}))
+
+      File.write!(Path.join(dir, ".gitignore"), ".sandman-src\n")
+      File.write!(Path.join(dir, "a.txt"), "one\n")
+      git(dir, ["add", "-A"])
+      git(dir, ["commit", "-q", "-m", "base"])
+
+      # the agent then edits and we deliver those edits at revision "head1"
+      File.write!(Path.join(dir, "a.txt"), "two\n")
+      File.write!(Path.join(dir, "b.txt"), "new\n")
+
+      assert :ok = RepoDelta.commit_after_emit(dir, "head1")
+
+      # working tree clean: later diffs only see post-delivery edits
+      assert git(dir, ["status", "--porcelain"]) == ""
+
+      # marker re-pointed at the delivered revision: the next emit carries a valid base
+      assert {:ok, %{"revision" => "head1"}} = RepoDelta.read_marker(dir)
+
+      # a new edit after the fold is visible as a worktree delta vs the new base
+      File.write!(Path.join(dir, "b.txt"), "new2\n")
+      {files, removed} = RepoDelta.worktree_delta(dir)
+      assert Map.keys(files) == ["b.txt"]
+      assert removed == []
+    end
+
+    test "missing marker makes commit_after_emit a silent no-op" do
+      dir = tmp_workspace()
+      assert :ok = RepoDelta.commit_after_emit(dir, "head1")
+    end
+  end
+
   defp tmp_workspace do
     dir = Path.join(System.tmp_dir!(), "repo_delta_test_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     dir
+  end
+
+  defp git(dir, args) do
+    {output, 0} = System.cmd("git", ["-C", dir | args], stderr_to_stdout: true)
+    output |> String.trim() |> then(& &1)
   end
 end

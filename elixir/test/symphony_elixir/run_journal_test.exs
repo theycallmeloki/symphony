@@ -127,4 +127,54 @@ defmodule SymphonyElixir.RunJournalTest do
       File.rm_rf(test_root)
     end
   end
+
+  test "status derives from last lifecycle event when fabric events follow run_finished" do
+    root = tmp_root()
+
+    try do
+      :ok = RunJournal.record(root, "A-1", "run_started", %{"run_index" => 1})
+      :ok = RunJournal.record(root, "A-1", "run_finished", %{"run_index" => 1, "status" => "completed"})
+      :ok = RunJournal.record(root, "A-1", "delta_emitted", %{"repo" => "r"})
+      :ok = RunJournal.record(root, "A-1", "build_succeeded", %{"repo" => "r"})
+
+      [issue] = RunJournal.all_issues(root)
+
+      assert issue.status == "completed"
+      assert issue.last_event == "build_succeeded"
+    after
+      File.rm_rf(root)
+    end
+  end
+
+  test "fabric-only journal falls back to last event for status" do
+    root = tmp_root()
+
+    try do
+      :ok = RunJournal.record(root, "B-2", "delta_emitted", %{"repo" => "r"})
+      :ok = RunJournal.record(root, "B-2", "job_started", %{"repo" => "r", "job_id" => "j-1"})
+
+      [issue] = RunJournal.all_issues(root)
+
+      assert issue.status == "job_started"
+      assert issue.last_event == "job_started"
+    after
+      File.rm_rf(root)
+    end
+  end
+
+  test "unfinished run keeps running status despite fabric events" do
+    root = tmp_root()
+
+    try do
+      :ok = RunJournal.record(root, "C-3", "run_started", %{"run_index" => 1})
+      :ok = RunJournal.record(root, "C-3", "delta_emitted", %{"repo" => "r"})
+
+      [issue] = RunJournal.all_issues(root)
+
+      assert issue.status == "running"
+      assert issue.last_event == "delta_emitted"
+    after
+      File.rm_rf(root)
+    end
+  end
 end

@@ -4,7 +4,16 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, Config, PromptBuilder, RepoDelta, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRuntime,
+    BuildFusion,
+    Config,
+    PromptBuilder,
+    RepoDelta,
+    RunJournal,
+    Tracker,
+    Workspace
+  }
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -52,12 +61,98 @@ defmodule SymphonyElixir.AgentRunner do
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
           # the run is over: deliver whatever the agent changed back to the
-          # mirrored repo as a delta (best effort, never fatal)
-          RepoDelta.best_effort_emit(workspace, issue, worker_host)
+          # mirrored repo as a delta and journal the emit (best effort,
+          # never fatal)
+          repo_delta_emit_and_journal(workspace, issue, worker_host)
         end
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Deliver the agent's changes back to the mirrored repo as a delta and,
+  # when a delta is delivered, journal it and hand the resulting head to
+  # BuildFusion for pipeline tracking. Best effort: never raises into the
+  # caller's `after` block and never fails the run.
+  defp repo_delta_emit_and_journal(workspace, issue, worker_host) do
+    if RepoDelta.enabled?(issue) and worker_host == nil do
+      emit_delta_and_journal(workspace, issue)
+    else
+      # Remote/unsupported hosts and non-repo runs keep the historical
+      # best-effort emit path unchanged (emit_delta already rejects
+      # remote hosts).
+      RepoDelta.best_effort_emit(workspace, issue, worker_host)
+    end
+  rescue
+    error ->
+      Logger.error(
+        "RepoDelta emit crashed #{issue_context(issue)} error=#{Exception.message(error)}"
+      )
+
+      :ok
+  end
+
+  defp emit_delta_and_journal(workspace, issue) do
+    case RepoDelta.emit_delta(workspace, issue, nil) do
+      {:ok, :delivered} ->
+        journal_delivered_delta(issue)
+
+      {:ok, :no_changes} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("RepoDelta emit skipped #{issue_context(issue)} reason=#{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp journal_delivered_delta(issue) do
+    case RepoDelta.mirror_head(RepoDelta.sandman_base(), issue.repo, RepoDelta.tracked_branch()) do
+      {:ok, head} when is_binary(head) ->
+        branch = RepoDelta.tracked_branch()
+        image = RepoDelta.repo_name(issue.repo)
+        registry = build_events_registry()
+
+        payload = %{
+          "issue_id" => issue.id,
+          "repo" => issue.repo,
+          "branch" => branch,
+          "head" => head,
+          "image" => image,
+          "registry" => registry
+        }
+
+        journal_event(issue, "delta_emitted", payload)
+        journal_event(issue, "build_submitted", payload)
+
+        if is_binary(issue.identifier) do
+          BuildFusion.track(issue.identifier, issue.repo, branch, image, registry, head)
+        end
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "RepoDelta head fetch skipped #{issue_context(issue)} reason=#{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp journal_event(issue, event, payload) do
+    if RunJournal.enabled?() and is_binary(issue.identifier) and is_binary(issue.repo) do
+      RunJournal.record(RunJournal.root(), issue.identifier, event, payload)
+    end
+
+    :ok
+  end
+
+  defp build_events_registry do
+    case Config.settings!().observability.build_events_registry do
+      registry when is_binary(registry) and registry != "" -> registry
+      _ -> BuildFusion.default_registry()
     end
   end
 

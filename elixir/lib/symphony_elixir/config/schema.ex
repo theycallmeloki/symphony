@@ -288,6 +288,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:render_interval_ms, :integer, default: 16)
       field(:run_journal_enabled, :boolean, default: true)
       field(:run_journal_root, :string)
+      field(:build_events_enabled, :boolean, default: true)
+      field(:build_events_interval_ms, :integer, default: 15_000)
+      field(:build_events_registry, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -295,8 +298,10 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
       |> cast(attrs, [:run_journal_enabled, :run_journal_root], empty_values: [])
+      |> cast(attrs, [:build_events_enabled, :build_events_interval_ms, :build_events_registry], empty_values: [])
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
+      |> validate_number(:build_events_interval_ms, greater_than: 0)
     end
   end
 

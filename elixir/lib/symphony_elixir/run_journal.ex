@@ -28,6 +28,7 @@ defmodule SymphonyElixir.RunJournal do
   @run_log "runs.jsonl"
   @transcript_log "transcript.jsonl"
   @max_payload_bytes 250_000
+  @lifecycle_events ~w(run_started run_finished issue_terminal)
 
   # ── Root resolution ──────────────────────────────────────────────────────
 
@@ -148,7 +149,7 @@ defmodule SymphonyElixir.RunJournal do
         issue_identifier: display_identifier,
         run_count: count_runs(events),
         event_count: length(events),
-        status: latest && status_from_event(latest),
+        status: if(events == [], do: nil, else: latest_lifecycle_status(events)),
         last_event: latest && latest["event"],
         last_at: latest && latest["at"]
       }
@@ -170,6 +171,17 @@ defmodule SymphonyElixir.RunJournal do
   def status_from_event(_), do: "unknown"
 
   # ── Internals ────────────────────────────────────────────────────────────
+
+  # Status derives from the last *lifecycle* event so fabric events appended
+  # after run_finished/issue_terminal (delta_emitted, job_*, build_*) don't
+  # override the coarse per-issue status. Journals holding only fabric events
+  # fall back to the plain last event, preserving the original behavior.
+  defp latest_lifecycle_status(events) do
+    case Enum.find(Enum.reverse(events), &(&1["event"] in @lifecycle_events)) do
+      nil -> status_from_event(List.last(events))
+      lifecycle_event -> status_from_event(lifecycle_event)
+    end
+  end
 
   defp count_runs(events) do
     events

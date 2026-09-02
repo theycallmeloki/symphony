@@ -215,6 +215,25 @@ defmodule SymphonyElixir.RepoDelta do
     |> List.last()
   end
 
+  @doc """
+  Fetches the current head commit id of a mapped repository's branch on the
+  sandman control plane. `base` is the control-plane address from
+  `sandman_base/0`; `nil` means no control plane is configured. Returns
+  `{:ok, head_id}` or `{:error, reason}` (`:not_mapped` when the repo or
+  branch has no head yet).
+  """
+  @spec mirror_head(nil | String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def mirror_head(nil, _repo_url, _branch), do: {:error, :sandman_not_configured}
+
+  def mirror_head(base, repo_url, branch)
+      when is_binary(base) and is_binary(repo_url) and is_binary(branch) do
+    case mapped_head(base, repo_name(repo_url), branch) do
+      {:ok, head_id, _revision} -> {:ok, head_id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # head of the mapped repo: its commit id plus the recorded external
   # revision (.git/HEAD marker), which is the delta base the control plane
   # will verify. A missing marker falls back to the commit id.

@@ -1814,11 +1814,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
       "verification_started" ->
         head = head12(journal_field(event, "head"))
         verify = journal_field(event, "verify_intent")
+        has_verify = is_binary(verify) and verify != ""
+        has_head = is_binary(head) and head != ""
 
         "verification started" <>
-          (if verify, do: " (verify #{short_id(verify)}", else: "") <>
-          (if head, do: " · #{head}", else: "") <>
-          (if verify or head, do: ")", else: "")
+          (if has_verify, do: " (verify #{short_id(verify)}", else: "") <>
+          (if has_head, do: " · #{head}", else: "") <>
+          (if has_verify or has_head, do: ")", else: "")
 
       "verify_passed" ->
         verdict_summary(event, "passed")

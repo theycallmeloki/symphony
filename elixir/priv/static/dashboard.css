@@ -492,37 +492,59 @@ textarea.intent-form-input {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--card-muted);
-  padding: 0.8rem 0.9rem;
+  padding: 0.65rem 0.8rem;
 }
 
 .queue-card-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.9rem;
+}
+
+.queue-card-head .issue-stack {
+  flex: 0 1 16rem;
+  min-width: 0;
+}
+
+.queue-card-head .issue-id {
+  white-space: nowrap;
 }
 
 .queue-card-actions {
   display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  flex: 0 1 auto;
+  align-items: center;
+  gap: 0.55rem;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .queue-task-form {
   display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.45rem;
   flex: 1 1 auto;
+  min-width: 0;
 }
 
 .queue-task-input {
-  flex: 1 1 22rem;
+  flex: 1 1 auto;
+  min-width: 8rem;
   resize: vertical;
 }
 
+.queue-task-form button,
+.queue-card-actions > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .queue-repo {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .intent-history {

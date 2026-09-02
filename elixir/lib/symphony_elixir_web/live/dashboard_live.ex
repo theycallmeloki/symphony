@@ -1291,7 +1291,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <% end %>
       </div>
 
-      <.seat_controls thread={@thread} phase={@phase} />
+      <.seat_controls thread={@thread} phase={@phase} verifications={@verifications} built_head={@built_head} />
       <%= if is_list(@dirty_files) and @dirty_files != [] do %>
         <div class="dirty-block">
           <div class="dirty-head">
@@ -1359,6 +1359,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   attr(:thread, :map, required: true)
   attr(:phase, :map, default: nil)
+  attr(:verifications, :list, default: [])
+  attr(:built_head, :string, default: nil)
 
   defp seat_controls(assigns) do
     ~H"""
@@ -1409,6 +1411,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 disabled={not deployable_thread?(@thread)}
                 title={if deployable_thread?(@thread), do: "Emit the parked workspace and submit a build", else: "Deploy needs a repo on the thread"}
               >Deploy &amp; build</button>
+
+            </div>
             <div class="controls-block">
               <div class="controls-title-row">
                 <h3 class="queue-title">Verification</h3>
@@ -1432,7 +1436,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <% true -> %>
                   <span class="muted controls-note">No build to verify yet — deploys auto-queue a pass.</span>
               <% end %>
-            </div>
             </div>
 
             <div class="controls-block">

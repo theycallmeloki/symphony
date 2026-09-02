@@ -132,14 +132,16 @@ def queue_repos(repos, state):
     for repo in repos:
         slug = repo["name"]
         payload = {
-            "state": state,
-            "title": f"Repo job: {slug}",
-            "repo": canonical_https(repo["remote"]),
-            "labels": ["repo-queue"],
-            "description": (
-                f"Queued repository job for {slug}. Assign a concrete task before activating: "
-                f"what should the agent build, change, verify, or report about this repository?"
-            ),
+            "intent": {
+                "state": state,
+                "title": f"Repo job: {slug}",
+                "repo": canonical_https(repo["remote"]),
+                "labels": ["repo-queue"],
+                "description": (
+                    f"Queued repository job for {slug}. Assign a concrete task before activating: "
+                    f"what should the agent build, change, verify, or report about this repository?"
+                ),
+            }
         }
         try:
             resp = api_request(f"{base}/api/v1/intents", payload)

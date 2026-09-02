@@ -483,9 +483,15 @@ textarea.intent-form-input {
 }
 
 .queue-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.6rem;
+}
+
+@media (min-width: 1180px) {
+  .queue-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .queue-card {

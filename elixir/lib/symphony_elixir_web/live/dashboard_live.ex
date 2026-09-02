@@ -21,15 +21,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @runtime_tick_ms 1_000
 
   @state_filters [
-    {"all", "All"},
+    {"active", "Active"},
     {"awaiting", "Ask satisfied"},
     {"queued", "Queued"},
     {"open", "Open"},
     {"running", "Running"},
-    {"done", "Done"},
-    {"failed", "Failed"},
-    {"cancelled", "Cancelled"}
+    {"archived", "Archive"}
   ]
+
+  @terminal_thread_states ~w(done failed cancelled)
 
   # Canonical thread lifecycle milestones for the phase strip (per latest
   # run cycle): steps are marked done/active/todo from intent state and the
@@ -60,7 +60,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign_intents(intents)
       |> assign(:notice, nil)
       |> assign(:notice_timer, nil)
-      |> assign(:intents_filter, "all")
+      |> assign(:intents_filter, "active")
       |> assign(:collapsed, default_collapsed())
       |> assign(:selected, nil)
       |> assign(:thread, nil)
@@ -391,11 +391,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def handle_event("filter_intents", %{"state" => state}, socket) when is_binary(state) do
-    {:noreply, assign(socket, :intents_filter, state)}
+    next_filter =
+      if state in Enum.map(@state_filters, &elem(&1, 0)) do
+        state
+      else
+        "active"
+      end
+
+    {:noreply, assign(socket, :intents_filter, next_filter)}
   end
 
   def handle_event("filter_intents", _params, socket) do
-    {:noreply, assign(socket, :intents_filter, "all")}
+    {:noreply, assign(socket, :intents_filter, "active")}
   end
 
   @impl true
@@ -864,7 +871,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <div class="wb-body">
         <aside class="wb-rail">
           <div class="wb-rail-head">
-            <span class="wb-rail-title">Threads</span>
+            <span class="wb-rail-title">Threads <span class="numeric rail-total"><%= thread_count(@threads, @intents_filter) %></span></span>
             <button type="button" class="wb-rail-new" phx-click="new_thread" title="Start a brand-new thread">
               New thread
             </button>
@@ -906,11 +913,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
             <%= if displayed_threads(@threads, @intents_filter) == [] do %>
               <p class="rail-empty">
-                <%= if @intents_filter == "all" do
-                  "No threads yet. Start one below."
-                else
-                  "No #{@intents_filter} threads."
-                end %>
+                <%= empty_thread_message(@intents_filter, @threads) %>
               </p>
             <% end %>
           </div>
@@ -2095,6 +2098,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # ── Filtering / counting ────────────────────────────────────────────────
 
   defp thread_count(threads, "all"), do: length(threads)
+  defp thread_count(threads, "active"), do: threads |> active_threads() |> length()
+  defp thread_count(threads, "archived"), do: threads |> archived_threads() |> length()
 
   defp thread_count(threads, state) do
     Enum.count(threads, &(&1.state == state))
@@ -2138,9 +2143,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp displayed_threads(threads, "all"), do: threads
+  defp displayed_threads(threads, "active"), do: active_threads(threads)
+  defp displayed_threads(threads, "archived"), do: archived_threads(threads)
 
   defp displayed_threads(threads, state) do
     Enum.filter(threads, &(&1.state == state))
+  end
+
+  defp empty_thread_message("active", threads) do
+    if archived_threads(threads) == [] do
+      "No threads yet. Start one below."
+    else
+      "No active threads. Archive holds completed work."
+    end
+  end
+
+  defp empty_thread_message("archived", _threads), do: "No archived threads."
+  defp empty_thread_message(filter, _threads), do: "No #{filter} threads."
+
+  defp active_threads(threads) do
+    Enum.reject(threads, &(&1.state in @terminal_thread_states))
+  end
+
+  defp archived_threads(threads) do
+    Enum.filter(threads, &(&1.state in @terminal_thread_states))
   end
 
   defp oldest_operator_wait(threads, now) do

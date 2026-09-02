@@ -2385,10 +2385,24 @@ button.secondary:hover {
 }
 
 .wb-rail-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   font-size: 0.86rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #bec7c0;
+}
+
+.rail-total {
+  min-width: 1.45rem;
+  padding: 0.12rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0c100f;
+  color: var(--ink);
+  font-size: 0.72rem;
+  text-align: center;
 }
 
 .wb-rail-new {
@@ -2409,6 +2423,24 @@ button.secondary:hover {
   justify-content: space-between;
   min-height: 1.9rem;
   padding: 0.24rem 0.45rem;
+  overflow: hidden;
+}
+
+.rail-filter .filter-chip:first-child {
+  grid-column: 1 / -1;
+}
+
+.rail-filter .filter-chip:last-child {
+  color: #87918a;
+  border-style: dashed;
+}
+
+.rail-filter .filter-chip {
+  min-width: 0;
+}
+
+.rail-filter .filter-chip {
+  white-space: nowrap;
 }
 
 .filter-chip-active {

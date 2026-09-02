@@ -113,7 +113,7 @@ defmodule SymphonyElixir.Intents.IntentStore do
 
   @doc """
   Moves an intent to a terminal state, recording an optional result map.
-  Only open/running intents may transition; terminal states are final.
+  Non-terminal states may transition; terminal states are final.
   """
   @spec set_terminal_state(String.t(), String.t(), map() | nil) ::
           {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
@@ -141,6 +141,7 @@ defmodule SymphonyElixir.Intents.IntentStore do
               case write_intent(updated) do
                 :ok ->
                   broadcast()
+                  stop_thread_session_if_terminal(state, id)
                   {:ok, updated}
 
                 {:error, reason} = error ->
@@ -157,11 +158,33 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   @doc """
-  Activates a queued intent: `queued` -> `open`, making it dispatchable.
+  Activates a queued or awaiting intent: -> `open`, making it dispatchable.
+  `awaiting` (ask satisfied, thread parked) re-opens when the human sends
+  the next prompt in the thread.
   """
   @spec activate_intent(String.t()) :: {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
   def activate_intent(id) when is_binary(id) do
-    transition_intent(id, "open", ["queued"], %{})
+    transition_intent(id, "open", ["queued", "awaiting"], %{})
+  end
+
+  @doc """
+  Moves a completed run's thread into `awaiting`: the ask is satisfied and
+  the workspace is dirty, waiting for a human deploy or next prompt. Only
+  open/running (non-terminal, non-queued) intents may enter awaiting.
+  """
+  @spec complete_to_awaiting(String.t(), map() | nil) ::
+          {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def complete_to_awaiting(id, result \\ nil) when is_binary(id) do
+    transition_intent(id, "awaiting", ["open", "running"], %{result: result})
+  end
+
+  @doc """
+  Closes an awaiting thread: `awaiting` -> `done` (terminal). The parked
+  agent session is stopped by the registry hook.
+  """
+  @spec close_intent(String.t()) :: {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def close_intent(id) when is_binary(id) do
+    transition_intent(id, "done", ["awaiting"], %{})
   end
 
   @doc """
@@ -183,12 +206,15 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   @doc """
-  Assigns a job spec and activates in one step: `queued` -> `open`.
+  Assigns a job spec and activates in one step: `queued`/`awaiting` ->
+  `open`. On an awaiting thread this delivers the NEXT prompt in the same
+  thread (description replaces the previous ask; the parked session keeps
+  the full conversation).
   """
   @spec assign_and_activate_intent(String.t(), map()) ::
           {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
   def assign_and_activate_intent(id, changes) when is_binary(id) and is_map(changes) do
-    transition_intent(id, "open", ["queued"], changes)
+    transition_intent(id, "open", ["queued", "awaiting"], changes)
   end
 
   defp transition_intent(id, to_state, from_states, changes) when is_binary(id) do
@@ -205,6 +231,7 @@ defmodule SymphonyElixir.Intents.IntentStore do
       case write_intent(updated) do
         :ok ->
           broadcast()
+          stop_thread_session_if_terminal(next_state, id)
           {:ok, updated}
 
         {:error, reason} = error ->
@@ -214,6 +241,18 @@ defmodule SymphonyElixir.Intents.IntentStore do
     else
       {:error, :not_found} = error -> error
       false -> {:error, :invalid_state}
+    end
+  end
+
+  # A thread that reaches a terminal state no longer needs its parked agent
+  # session; stop it so the pi process is released. Guarded: no-op unless
+  # the SessionRegistry is actually running (unit tests / non-thread runs).
+  defp stop_thread_session_if_terminal(state, id) do
+    if Intent.terminal_state?(state) do
+      case Process.whereis(SymphonyElixir.AgentRuntime.SessionRegistry) do
+        pid when is_pid(pid) -> SymphonyElixir.AgentRuntime.SessionRegistry.stop(id)
+        _ -> :ok
+      end
     end
   end
 

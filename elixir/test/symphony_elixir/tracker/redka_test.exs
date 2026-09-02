@@ -61,14 +61,37 @@ defmodule SymphonyElixir.Tracker.RedkaTest do
   end
 
   describe "notify_run_finished/3" do
-    test "completed closes the intent as done" do
+    test "completed parks the thread in awaiting (ask satisfied, human turn)" do
       {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
 
       assert :ok = Redka.notify_run_finished(intent.id, "completed", %{})
 
-      assert {:ok, %{state: "done", result: result}} = IntentStore.get_intent(intent.id)
+      assert {:ok, %{state: "awaiting", result: result}} = IntentStore.get_intent(intent.id)
       assert result["status"] == "completed"
       assert is_binary(result["at"])
+    end
+
+    test "completed closes an internal verification pass to done" do
+      {:ok, intent} =
+        IntentStore.create_intent(%{
+          "title" => "job",
+          "verify_for" => "int-original-abc123",
+          "labels" => ["verify"]
+        })
+
+      assert :ok = Redka.notify_run_finished(intent.id, "completed", %{})
+
+      assert {:ok, %{state: "done"}} = IntentStore.get_intent(intent.id)
+    end
+
+    test "an awaiting thread re-opens with the next prompt" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+      :ok = Redka.notify_run_finished(intent.id, "completed", %{})
+
+      {:ok, %{state: "open"}} =
+        IntentStore.assign_and_activate_intent(intent.id, %{description: "next prompt"})
+
+      assert {:ok, %{description: "next prompt"}} = IntentStore.get_intent(intent.id)
     end
 
     test "failed closes the intent as failed with error" do

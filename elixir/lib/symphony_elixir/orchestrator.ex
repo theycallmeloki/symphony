@@ -963,7 +963,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           # Harness threading: the agent session is parked per thread so a
+           # later human prompt resumes the same conversation.
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             park_sessions: true
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)

@@ -381,7 +381,7 @@ defmodule SymphonyElixir.RepoDelta do
   """
   @spec commit_after_emit(Path.t(), String.t()) :: :ok
   def commit_after_emit(workspace, delivered_revision) when is_binary(delivered_revision) do
-    with {:ok, %{"url" => repo, "branch" => branch}} <- read_marker(workspace),
+    with {:ok, %{"url" => repo}} <- read_marker(workspace),
          {:ok, _} <- git_ok(workspace, ["add", "-A"]),
          {:ok, _} <-
            git_ok(workspace, [

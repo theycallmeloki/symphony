@@ -46,9 +46,12 @@ defmodule SymphonyElixir.BuildFusion do
           image: String.t(),
           registry: String.t() | nil,
           head: String.t(),
+          # the thread's current ask; needed to build the auto-verify prompt
+          description: String.t() | nil,
           jobs: MapSet.t(),
           job_done: boolean(),
           built: boolean(),
+          verify_started: boolean(),
           tracked_at: DateTime.t() | nil
         }
 
@@ -68,12 +71,15 @@ defmodule SymphonyElixir.BuildFusion do
   Start tracking a build for an issue (async). `repo_url` is the git clone
   URL, `head` the commit under build; `registry` defaults to the configured
   `observability.build_events_registry` or `default_registry/0` when nil.
-  Lifecycle events are journaled as the build progresses. No-op while the
-  process is idle (build events disabled or no sandman control plane).
+  `description` (the thread's current ask) enables the auto-verify pass on
+  build success. Lifecycle events are journaled as the build progresses.
+  No-op while the process is idle (build events disabled or no sandman
+  control plane).
   """
-  @spec track(String.t(), String.t(), String.t(), String.t(), String.t() | nil, String.t()) :: :ok
-  def track(issue_identifier, repo_url, branch, image, registry, head) do
-    GenServer.cast(__MODULE__, {:track, issue_identifier, repo_url, branch, image, registry, head})
+  @spec track(String.t(), String.t(), String.t(), String.t(), String.t() | nil, String.t(), String.t() | nil) ::
+          :ok
+  def track(issue_identifier, repo_url, branch, image, registry, head, description \\ nil) do
+    GenServer.cast(__MODULE__, {:track, issue_identifier, repo_url, branch, image, registry, head, description})
   end
 
   # ── Pure reconcile core ─────────────────────────────────────────────────
@@ -154,7 +160,7 @@ defmodule SymphonyElixir.BuildFusion do
 
   @impl true
   def handle_cast(
-        {:track, issue_identifier, repo_url, branch, image, registry, head},
+        {:track, issue_identifier, repo_url, branch, image, registry, head, description},
         %{pending: pending} = state
       ) do
     entry = %{
@@ -163,16 +169,21 @@ defmodule SymphonyElixir.BuildFusion do
       image: image,
       registry: resolve_registry(registry),
       head: head,
+      description: description,
       jobs: MapSet.new(),
       job_done: false,
       built: false,
+      verify_started: false,
       tracked_at: DateTime.utc_now()
     }
 
-    {:noreply, %{state | pending: Map.put(pending, issue_identifier, entry)}}
+    # One pending entry per (issue, head): a thread can deploy several
+    # builds in sequence, and a new deploy must not clobber an in-flight
+    # one's reconciliation.
+    {:noreply, %{state | pending: Map.put(pending, pending_key(issue_identifier, head), entry)}}
   end
 
-  def handle_cast({:track, _, _, _, _, _, _}, state) do
+  def handle_cast({:track, _, _, _, _, _, _, _}, state) do
     # Idle: tracking is a no-op.
     {:noreply, state}
   end
@@ -204,10 +215,10 @@ defmodule SymphonyElixir.BuildFusion do
   defp reconcile_pending(pending) do
     case RepoDelta.sandman_base() do
       sandman when is_binary(sandman) and sandman != "" ->
-        Enum.reduce(pending, %{}, fn {issue_identifier, entry}, acc ->
-          case reconcile_one(issue_identifier, entry, sandman) do
+        Enum.reduce(pending, %{}, fn {key, entry}, acc ->
+          case reconcile_one(key, entry, sandman) do
             nil -> acc
-            {_issue_identifier, updated_entry} -> Map.put(acc, issue_identifier, updated_entry)
+            {_key, updated_entry} -> Map.put(acc, key, updated_entry)
           end
         end)
 
@@ -216,7 +227,8 @@ defmodule SymphonyElixir.BuildFusion do
     end
   end
 
-  defp reconcile_one(issue_identifier, entry, sandman) do
+  defp reconcile_one(key, entry, sandman) do
+    issue_identifier = issue_identifier_from_key(key)
     registry = entry.registry || default_registry()
 
     fetchers = %{
@@ -229,8 +241,133 @@ defmodule SymphonyElixir.BuildFusion do
     case reconcile(entry, fetchers, journal_fn) do
       # reconcile/3 reports a prune as {nil, _journaled}; a bare nil entry
       # must not be wrapped back into the pending map.
-      {nil, _journaled} -> nil
-      {updated, _journaled} -> {issue_identifier, updated}
+      {nil, journaled} ->
+        maybe_start_verify(issue_identifier, entry, journaled)
+        nil
+
+      {updated, journaled} ->
+        if maybe_start_verify(issue_identifier, entry, journaled) do
+          {key, %{updated | verify_started: true}}
+        else
+          {key, updated}
+        end
+    end
+  end
+
+  defp pending_key(issue_identifier, head) do
+    issue_identifier <> "|" <> head
+  end
+
+  defp issue_identifier_from_key(key) do
+    case String.split(key, "|", parts: 2) do
+      [identifier, _head] -> identifier
+      _ -> key
+    end
+  end
+
+  # ── Auto-verify ─────────────────────────────────────────────────────────
+  #
+  # When a tracked build succeeds (the registry carries the short head
+  # tag), queue one read-only verification intent against the thread's
+  # repo if auto-verify is enabled and no verification is already queued
+  # for the thread. The verdict (verify.txt) is journaled onto the thread
+  # by AgentRunner when the pass runs. Returns true when a pass was
+  # queued so the caller can mark the entry.
+
+  defp maybe_start_verify(issue_identifier, entry, journaled) do
+    if "build_succeeded" in journaled and
+         not entry.verify_started and
+         auto_verify_enabled?() and
+         is_binary(entry.description) and
+         String.trim(entry.description) != "" and
+         is_binary(entry.repo) and
+         no_active_verify?(issue_identifier) do
+      create_verify_intent(issue_identifier, entry)
+    else
+      false
+    end
+  end
+
+  defp auto_verify_enabled? do
+    case Config.settings() do
+      {:ok, settings} ->
+        Map.get(settings.observability, :auto_verify_enabled, true)
+
+      _ ->
+        true
+    end
+  end
+
+  defp no_active_verify?(issue_identifier) do
+    case SymphonyElixir.Intents.IntentStore.list_intents() do
+      {:ok, intents} ->
+        not Enum.any?(intents, fn intent ->
+          intent.verify_for == issue_identifier and
+            not SymphonyElixir.Intents.Intent.terminal_state?(intent.state)
+        end)
+
+      _ ->
+        true
+    end
+  end
+
+  defp create_verify_intent(issue_identifier, entry) do
+    description = """
+    READ-ONLY VERIFICATION PASS — do not modify any repository files.
+
+    A prior agent run claimed this request was satisfied, and the change
+    was built and deployed to the repository mirror:
+
+      Repository: #{entry.repo}
+      Built head: #{entry.head}
+
+    Original request:
+    #{String.trim(entry.description)}
+
+    Verify whether the request is actually satisfied by the state of this
+    workspace (the repository at the built head): read the relevant code,
+    run cheap checks, and reason about it. Do NOT edit or add any
+    repository files.
+
+    When you have reached a verdict, write a file named `verify.txt` in
+    the workspace root whose first line is exactly one of:
+
+      SOLVED
+      NOT_SOLVED
+      UNCLEAR
+
+    and whose remaining lines are concise evidence: what you checked and
+    what you found. Then finish your turn.
+    """
+
+    title =
+      "Verify #{String.slice(entry.head, 0, 8)} — " <>
+        (issue_identifier |> String.split("-") |> List.last() |> Kernel.||(issue_identifier))
+
+    case SymphonyElixir.Intents.IntentStore.create_intent(%{
+           "state" => "queued",
+           "title" => title,
+           "repo" => entry.repo,
+           "description" => description,
+           "labels" => ["verify"],
+           "verify_for" => issue_identifier
+         }) do
+      {:ok, %{id: verify_id}} ->
+        SymphonyElixir.Intents.IntentStore.activate_intent(verify_id)
+
+        journal(issue_identifier, "verification_started", %{
+          "head" => entry.head,
+          "verify_intent" => verify_id
+        })
+
+        true
+
+      {:error, reason} ->
+        Logger.error(
+          "auto-verify intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}"
+        )
+
+        false
     end
   end
 

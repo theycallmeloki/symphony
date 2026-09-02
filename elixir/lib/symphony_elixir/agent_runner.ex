@@ -1,12 +1,19 @@
-defmodule SymphonyElixir.AgentRunner do
+  defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single tracker work item in its workspace with Codex.
+  Executes a single tracker work item in its workspace with the configured
+  agent runtime (pi via pi-acp by default).
+
+  Runs are *threaded*: when the SessionRegistry is live the agent session
+  is parked between dispatches, so the next human prompt in the same
+  thread resumes the same conversation. A normal run completion never
+  emits the workspace — delivery happens only when the human triggers a
+  deploy (the harness model). Internal verification intents additionally
+  record a verdict (`verify.txt`) to the thread they verify.
   """
 
   require Logger
   alias SymphonyElixir.{
     AgentRuntime,
-    BuildFusion,
     Config,
     PromptBuilder,
     RepoDelta,
@@ -14,6 +21,8 @@ defmodule SymphonyElixir.AgentRunner do
     Tracker,
     Workspace
   }
+  alias SymphonyElixir.AgentRuntime.{SessionPark, SessionRegistry}
+  alias SymphonyElixir.Intents.{Intent, IntentStore}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -54,107 +63,109 @@ defmodule SymphonyElixir.AgentRunner do
         # the workspace before the agent starts (best effort, never fatal)
         RepoDelta.best_effort_bootstrap(workspace, issue, worker_host)
 
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+        result =
+          try do
+            with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            end
+          after
+            Workspace.run_after_run_hook(workspace, issue, worker_host)
           end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
-          # the run is over: deliver whatever the agent changed back to the
-          # mirrored repo as a delta and journal the emit (best effort,
-          # never fatal)
-          repo_delta_emit_and_journal(workspace, issue, worker_host)
-        end
+
+        # Verification passes never emit; they record a verdict instead.
+        # Harness threads never emit at run end either — delivery happens
+        # only via the explicit deploy action on the awaiting thread.
+        maybe_record_verify_verdict(result, workspace, issue)
+        result
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  # Deliver the agent's changes back to the mirrored repo as a delta and,
-  # when a delta is delivered, journal it and hand the resulting head to
-  # BuildFusion for pipeline tracking. Best effort: never raises into the
-  # caller's `after` block and never fails the run.
-  defp repo_delta_emit_and_journal(workspace, issue, worker_host) do
-    if RepoDelta.enabled?(issue) and worker_host == nil do
-      emit_delta_and_journal(workspace, issue)
-    else
-      # Remote/unsupported hosts and non-repo runs keep the historical
-      # best-effort emit path unchanged (emit_delta already rejects
-      # remote hosts).
-      RepoDelta.best_effort_emit(workspace, issue, worker_host)
+  # -- verification verdicts -------------------------------------------------
+  #
+  # A verification intent (verify_for set) runs one read-only pass against
+  # the built head's tree. When it completes cleanly, its verdict file
+  # (`verify.txt`: line 1 SOLVED | NOT_SOLVED | UNCLEAR, then evidence) is
+  # journaled onto the thread it verifies. Best effort: never raises, never
+  # fails the run.
+
+  defp maybe_record_verify_verdict(:ok, workspace, %Issue{identifier: identifier})
+       when is_binary(identifier) do
+    case verify_target(identifier) do
+      {:verify, verify_for} ->
+        record_verify_verdict(workspace, identifier, verify_for)
+
+      :not_verify ->
+        :ok
     end
   rescue
     error ->
-      Logger.error(
-        "RepoDelta emit crashed #{issue_context(issue)} error=#{Exception.message(error)}"
-      )
-
+      Logger.error("verify verdict recording crashed error=#{Exception.message(error)}")
       :ok
   end
 
-  defp emit_delta_and_journal(workspace, issue) do
-    case RepoDelta.emit_delta(workspace, issue, nil) do
-      {:ok, :delivered} ->
-        journal_delivered_delta(issue)
+  defp maybe_record_verify_verdict(_result, _workspace, _issue), do: :ok
 
-      {:ok, :no_changes} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("RepoDelta emit skipped #{issue_context(issue)} reason=#{inspect(reason)}")
-        :ok
+  defp verify_target(identifier) do
+    case IntentStore.get_intent(identifier) do
+      {:ok, %Intent{verify_for: verify_for}} when is_binary(verify_for) -> {:verify, verify_for}
+      _ -> :not_verify
     end
   end
 
-  defp journal_delivered_delta(issue) do
-    case RepoDelta.mirror_head(RepoDelta.sandman_base(), issue.repo, RepoDelta.tracked_branch()) do
-      {:ok, head} when is_binary(head) ->
-        branch = RepoDelta.tracked_branch()
-        image = RepoDelta.repo_name(issue.repo)
-        registry = build_events_registry()
+  defp record_verify_verdict(workspace, verify_intent_id, verify_for) do
+    verdict_file = Path.join(workspace, "verify.txt")
 
-        payload = %{
-          "issue_id" => issue.id,
-          "repo" => issue.repo,
-          "branch" => branch,
-          "head" => head,
-          "image" => image,
-          "registry" => registry
-        }
+    case File.read(verdict_file) do
+      {:ok, content} ->
+        lines = content |> String.split("\n", trim: true)
 
-        journal_event(issue, "delta_emitted", payload)
-        journal_event(issue, "build_submitted", payload)
+        case lines do
+          [verdict | evidence_lines] ->
+            verdict_atom = normalize_verdict(verdict)
+            event = verdict_event(verdict_atom)
 
-        if is_binary(issue.identifier) do
-          BuildFusion.track(issue.identifier, issue.repo, branch, image, registry, head)
+            payload = %{
+              "verify_intent" => verify_intent_id,
+              "workspace" => workspace,
+              "verdict" => to_string(verdict_atom),
+              "evidence" => Enum.join(evidence_lines, "\n")
+            }
+
+            if RunJournal.enabled?() do
+              RunJournal.record(RunJournal.root(), verify_for, event, payload)
+              Logger.info("Verification verdict #{event} thread=#{verify_for} verdict=#{verdict_atom}")
+            end
+
+          _ ->
+            Logger.warning(
+              "verify.txt present but unreadable as a verdict verify_intent=#{verify_intent_id}"
+            )
         end
 
-        :ok
+      {:error, :enoent} ->
+        Logger.warning("verification pass finished without verify.txt verify_intent=#{verify_intent_id}")
 
       {:error, reason} ->
-        Logger.warning(
-          "RepoDelta head fetch skipped #{issue_context(issue)} reason=#{inspect(reason)}"
-        )
-
-        :ok
-    end
-  end
-
-  defp journal_event(issue, event, payload) do
-    if RunJournal.enabled?() and is_binary(issue.identifier) and is_binary(issue.repo) do
-      RunJournal.record(RunJournal.root(), issue.identifier, event, payload)
+        Logger.warning("verify.txt read failed verify_intent=#{verify_intent_id} reason=#{inspect(reason)}")
     end
 
     :ok
   end
 
-  defp build_events_registry do
-    case Config.settings!().observability |> Map.get(:build_events_registry) do
-      registry when is_binary(registry) and registry != "" -> registry
-      _ -> BuildFusion.default_registry()
+  defp normalize_verdict(line) do
+    case line |> String.trim() |> String.upcase() do
+      "SOLVED" -> :solved
+      "NOT_SOLVED" -> :not_solved
+      _ -> :unclear
     end
   end
+
+  defp verdict_event(:solved), do: "verify_passed"
+  defp verdict_event(:not_solved), do: "verify_failed"
+  defp verdict_event(:unclear), do: "verify_unclear"
 
   defp codex_message_handler(recipient, issue) do
     fn message ->
@@ -189,29 +200,82 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
-    runtime = AgentRuntime.impl()
 
-    with {:ok, session} <- runtime.start_session(workspace, worker_host: worker_host) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        runtime.stop_session(session)
-      end
+    case parked_turn_runner(issue, workspace, codex_update_recipient, opts, worker_host) do
+      {:ok, turn_runner} ->
+        # The session is parked (owned by the SessionRegistry) and stays
+        # alive after this run returns — the thread survives for the next
+        # human prompt or a deploy of the parked workspace.
+        do_run_codex_turns(turn_runner, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+
+      {:error, :not_running} ->
+        # No SessionRegistry (unit tests / standalone boot / park opt-in):
+        # run with an inline session owned by this task and stop it when
+        # the run ends.
+        runtime = AgentRuntime.impl()
+
+        with {:ok, session} <- runtime.start_session(workspace, worker_host: worker_host) do
+          try do
+            turn_runner = fn prompt, turn_issue ->
+              runtime.run_turn(
+                session,
+                prompt,
+                turn_issue,
+                on_message: codex_message_handler(codex_update_recipient, turn_issue)
+              )
+            end
+
+            do_run_codex_turns(turn_runner, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+          after
+            runtime.stop_session(session)
+          end
+        end
+
+      {:error, reason} ->
+        {:error, {:session_acquire_failed, reason}}
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  # A turn runner bound to the issue's parked session: only when the
+  # orchestrator dispatched with `park_sessions: true` (the harness
+  # runtime) and the SessionRegistry is live. Otherwise falls back to
+  # inline (test/legacy) sessions.
+  defp parked_turn_runner(%Issue{identifier: identifier} = issue, workspace, codex_update_recipient, opts, _worker_host)
+       when is_binary(identifier) do
+    if Keyword.get(opts, :park_sessions, false) do
+      case SessionRegistry.acquire(identifier, workspace) do
+        {:ok, park_pid, mode} ->
+          Logger.info("Agent session #{mode} for #{issue_context(issue)} workspace=#{workspace}")
+
+          {:ok,
+           fn prompt, turn_issue ->
+             SessionPark.run_turn(
+               park_pid,
+               prompt,
+               turn_issue,
+               on_message: codex_message_handler(codex_update_recipient, turn_issue)
+             )
+           end}
+
+        {:error, :not_running} = error ->
+          error
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :not_running}
+    end
+  end
+
+  defp parked_turn_runner(_issue, _workspace, _codex_update_recipient, _opts, _worker_host) do
+    {:error, :not_running}
+  end
+
+  defp do_run_codex_turns(turn_runner, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
-    runtime = AgentRuntime.impl()
-
-    with {:ok, turn_session} <-
-           runtime.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
+    with {:ok, turn_session} <- turn_runner.(prompt, issue) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
       case continue_with_issue?(issue, issue_state_fetcher) do
@@ -219,7 +283,7 @@ defmodule SymphonyElixir.AgentRunner do
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
           do_run_codex_turns(
-            app_session,
+            turn_runner,
             workspace,
             refreshed_issue,
             codex_update_recipient,

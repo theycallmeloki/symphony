@@ -137,6 +137,46 @@ defmodule SymphonyElixirWeb.IntentsApiController do
   defp to_atom(key) when is_atom(key), do: key
   defp to_atom(key) when is_binary(key), do: String.to_atom(key)
 
+  @spec close(Conn.t(), map()) :: Conn.t()
+  def close(conn, %{"intent_id" => intent_id}) do
+    case IntentStore.close_intent(intent_id) do
+      {:ok, intent} ->
+        json(conn, %{intent: Intent.to_api_map(intent)})
+
+      {:error, :not_found} ->
+        error_response(conn, 404, :not_found, "Intent not found")
+
+      {:error, :invalid_state} ->
+        error_response(conn, 409, :invalid_state, "Only awaiting threads can be closed")
+
+      {:error, reason} ->
+        error_response(conn, 503, :store_unavailable, "Intent store unavailable: #{inspect(reason)}")
+    end
+  end
+
+  @spec deploy(Conn.t(), map()) :: Conn.t()
+  def deploy(conn, %{"intent_id" => intent_id}) do
+    case SymphonyElixir.Deployer.deploy(intent_id) do
+      {:ok, %{head: head, state: :deployed}} ->
+        json(conn, %{deployed: %{intent_id: intent_id, head: head, submitted: true}})
+
+      {:ok, :no_changes} ->
+        error_response(conn, 409, :no_changes, "Workspace has no edits to deploy")
+
+      {:error, {:invalid_state, state}} ->
+        error_response(conn, 409, :invalid_state, "Thread is #{state}; only awaiting threads can be deployed")
+
+      {:error, :no_parked_workspace} ->
+        error_response(conn, 409, :no_parked_workspace, "No parked agent workspace for this thread")
+
+      {:error, :workspace_missing} ->
+        error_response(conn, 409, :workspace_missing, "Parked workspace no longer exists")
+
+      {:error, reason} ->
+        error_response(conn, 502, :deploy_failed, "Deploy failed: #{inspect(reason)}")
+    end
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, :method_not_allowed, "Method not allowed")

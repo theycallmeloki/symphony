@@ -9,10 +9,15 @@ defmodule SymphonyElixir.Intents.Intent do
 
   alias SymphonyElixir.Intents.Intent
 
+  # `awaiting` marks a thread whose last run completed: the ask is
+  # satisfied and the workspace sits dirty waiting for the human — a
+  # deploy or the next prompt. It is NOT terminal and never auto-dispatches
+  # (only `open` is in the tracker's active_states).
   @states %{
     "queued" => :queued,
     "open" => :active,
     "running" => :active,
+    "awaiting" => :active,
     "done" => :terminal,
     "failed" => :terminal,
     "cancelled" => :terminal
@@ -26,6 +31,7 @@ defmodule SymphonyElixir.Intents.Intent do
     :repo,
     :labels,
     :result,
+    :verify_for,
     :created_at,
     :updated_at
   ]
@@ -38,9 +44,17 @@ defmodule SymphonyElixir.Intents.Intent do
           repo: String.t() | nil,
           labels: [String.t()],
           result: map() | nil,
+          # set on auto-registered verification intents: the identifier of
+          # the thread whose build this pass verifies
+          verify_for: String.t() | nil,
           created_at: String.t() | nil,
           updated_at: String.t() | nil
         }
+
+  @doc "Whether the intent is an internal verification pass (not a user thread)."
+  @spec verify?(t()) :: boolean()
+  def verify?(%__MODULE__{verify_for: verify_for}) when is_binary(verify_for), do: true
+  def verify?(%__MODULE__{labels: labels}), do: "verify" in (labels || [])
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do
@@ -59,6 +73,7 @@ defmodule SymphonyElixir.Intents.Intent do
         repo: blank_to_nil(attrs[:repo]),
         labels: normalize_labels(attrs[:labels]),
         result: nil,
+        verify_for: blank_to_nil(attrs[:verify_for]),
         created_at: now,
         updated_at: now
       }
@@ -77,6 +92,7 @@ defmodule SymphonyElixir.Intents.Intent do
       repo: fields["repo"],
       labels: decode_json_list(fields["labels"]),
       result: decode_json_map(fields["result"]),
+      verify_for: blank_value(fields["verify_for"]),
       created_at: fields["created_at"],
       updated_at: fields["updated_at"]
     }
@@ -92,6 +108,7 @@ defmodule SymphonyElixir.Intents.Intent do
       "repo" => store_value(intent.repo),
       "labels" => Jason.encode!(intent.labels || []),
       "result" => encode_json_map(intent.result),
+      "verify_for" => store_value(intent.verify_for),
       "created_at" => store_value(intent.created_at),
       "updated_at" => store_value(intent.updated_at)
     }
@@ -131,6 +148,7 @@ defmodule SymphonyElixir.Intents.Intent do
       repo: intent.repo,
       labels: intent.labels || [],
       result: intent.result,
+      verify_for: intent.verify_for,
       created_at: intent.created_at,
       updated_at: intent.updated_at
     }
@@ -189,6 +207,15 @@ defmodule SymphonyElixir.Intents.Intent do
   end
 
   defp blank_to_nil(value), do: value
+
+  defp blank_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_value(value), do: value
 
   defp iso_now do
     DateTime.utc_now() |> DateTime.to_iso8601()

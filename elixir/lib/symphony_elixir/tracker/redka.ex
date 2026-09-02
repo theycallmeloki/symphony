@@ -13,10 +13,14 @@ defmodule SymphonyElixir.Tracker.Redka do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Intents.IntentStore
+  alias SymphonyElixir.Intents.{Intent, IntentStore}
   alias SymphonyElixir.Tracker.Issue
 
-  @terminal_outcomes %{"completed" => "done", "failed" => "failed", "blocked" => "failed"}
+  # failed/blocked land terminal. A normal completion lands `awaiting` —
+  # the thread's ask is satisfied and the workspace is parked for the human
+  # (deploy or next prompt) — except internal verification passes, which
+  # are one-shot and close to `done`.
+  @failed_outcomes %{"failed" => "failed", "blocked" => "failed"}
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) do
@@ -42,41 +46,61 @@ defmodule SymphonyElixir.Tracker.Redka do
   end
 
   @doc """
-  Terminal transition for intent-backed issues.
+  Run-outcome transition for intent-backed issues.
 
-  Maps orchestrator run outcomes to intent states (`completed` → `done`,
-  `failed`/`blocked` → `failed`). Intents that were cancelled or already
-  terminal are left untouched.
+  Maps orchestrator run outcomes to intent states: a normal completion
+  parks the thread in `awaiting` (ask satisfied — deploy or next prompt),
+  an internal verification pass closes to `done`, and `failed`/`blocked`
+  go terminal as `failed`. Intents that were cancelled or already terminal
+  are left untouched.
   """
   @spec notify_run_finished(String.t(), String.t(), map()) :: :ok
   def notify_run_finished(issue_id, status, details) when is_binary(issue_id) and is_binary(status) do
-    case Map.get(@terminal_outcomes, status) do
-      nil ->
+    result = %{
+      "status" => status,
+      "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "error" => Map.get(details || %{}, "error")
+    }
+
+    case {status, IntentStore.get_intent(issue_id)} do
+      {"completed", {:ok, %Intent{verify_for: verify_for}}}
+      when is_binary(verify_for) ->
+        # internal verification pass: one-shot, close it terminal
+        set_terminal(issue_id, "done", result)
+
+      {"completed", {:ok, _intent}} ->
+        # normal completion: park the thread for the human
+        case IntentStore.complete_to_awaiting(issue_id, result) do
+          {:ok, _} -> :ok
+          {:error, :not_found} -> :ok
+          {:error, reason} -> warn(issue_id, status, reason)
+        end
+
+      {"completed", _} ->
         :ok
 
-      intent_state ->
-        result = %{
-          "status" => status,
-          "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-          "error" => Map.get(details || %{}, "error")
-        }
-
-        case IntentStore.set_terminal_state(issue_id, intent_state, result) do
-          {:ok, %{state: ^intent_state}} ->
-            :ok
-
-          {:ok, _intent} ->
-            :ok
-
-          {:error, :not_found} ->
-            :ok
-
-          {:error, reason} ->
-            require Logger
-            Logger.warning("Redka tracker terminal transition failed issue_id=#{issue_id} status=#{status} reason=#{inspect(reason)}")
-            :ok
+      {status, _} ->
+        case Map.get(@failed_outcomes, status) do
+          nil -> :ok
+          intent_state -> set_terminal(issue_id, intent_state, result)
         end
     end
+
+    :ok
+  end
+
+  defp set_terminal(issue_id, intent_state, result) do
+    case IntentStore.set_terminal_state(issue_id, intent_state, result) do
+      {:ok, _intent} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, reason} -> warn(issue_id, intent_state, reason)
+    end
+  end
+
+  defp warn(issue_id, status, reason) do
+    require Logger
+    Logger.warning("Redka tracker transition failed issue_id=#{issue_id} status=#{status} reason=#{inspect(reason)}")
+    :ok
   end
 
   @spec secret_environment_names(map()) :: [String.t()]

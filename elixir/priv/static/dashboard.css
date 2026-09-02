@@ -452,13 +452,6 @@ textarea.intent-form-input {
   flex: 0 0 auto;
 }
 
-.form-error {
-  margin: 0.9rem 0 0;
-  color: var(--danger);
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-
 .intent-title {
   font-size: 0.92rem;
   max-width: 26rem;
@@ -568,6 +561,187 @@ textarea.intent-form-input {
   font-size: 0.9rem;
 }
 
+.section-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.section-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.collapse-count {
+  min-height: 1.6rem;
+  padding: 0.22rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.collapse-toggle {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.collapse-toggle:hover {
+  background: white;
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.collapse-summary {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.9rem 0 0;
+  padding: 0.7rem 0.9rem 0.7rem 1rem;
+  border-radius: 14px;
+  border: 1px solid;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.notice-success {
+  background: var(--accent-soft);
+  border-color: rgba(16, 163, 127, 0.28);
+  color: var(--accent-ink);
+}
+
+.notice-error {
+  background: var(--danger-soft);
+  border-color: #f6d3cf;
+  color: var(--danger);
+}
+
+.notice-dismiss {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+  cursor: pointer;
+  border-radius: 8px;
+  box-shadow: none;
+  opacity: 0.65;
+}
+
+.notice-dismiss:hover {
+  opacity: 1;
+  transform: none;
+  box-shadow: none;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.intent-forms-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1.15rem;
+}
+
+.intent-forms-grid .intent-form {
+  margin-top: 0;
+  padding: 1rem 1.1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--page-soft);
+}
+
+.form-hint {
+  margin: -0.15rem 0 0.55rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1.25rem;
+}
+
+.history-head .queue-title {
+  margin: 0;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.filter-chip {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.72rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.filter-chip:hover {
+  background: white;
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.filter-chip-active {
+  background: var(--accent-soft);
+  border-color: rgba(16, 163, 127, 0.35);
+  color: var(--accent-ink);
+}
+
+.chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  font-size: 0.74rem;
+}
+
+.intent-history .table-wrap {
+  margin-top: 0.75rem;
+}
+
 .empty-state {
   margin: 1rem 0 0;
   color: var(--muted);
@@ -607,6 +781,29 @@ textarea.intent-form-input {
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .intent-forms-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .queue-card-head {
+    flex-direction: column;
+  }
+
+  .queue-card-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .queue-task-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .queue-task-input {
+    flex: 1 1 auto;
   }
 }
 

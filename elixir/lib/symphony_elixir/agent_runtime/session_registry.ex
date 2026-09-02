@@ -203,7 +203,7 @@ defmodule SymphonyElixir.AgentRuntime.SessionRegistry do
     receive do
       {:park_ready, ^pid, {:ok, session}} ->
         session_id = Map.get(session, :session_id)
-        state = put_in(state.parks, [issue_id, :session_id], session_id)
+        state = put_in(state, [:parks, issue_id, :session_id], session_id)
         park = Map.fetch!(state.parks, issue_id)
         {:ok, park, state}
 

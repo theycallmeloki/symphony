@@ -1,6 +1,17 @@
 defmodule SymphonyElixirWeb.DashboardLive do
   @moduledoc """
-  Live observability dashboard for Symphony.
+  Workbench harness dashboard for Symphony.
+
+  A user writes a prompt; the prompt goes to the pi agent, which works on a
+  real checkout and then parks. The thread BLOCKS on "ask satisfied"; the
+  operator either deploys the parked workspace or sends the next prompt,
+  which resumes the same session. After a deploy, an auto verification pass
+  journals its verdict back onto the thread.
+
+  Layout: a thread rail on the left (non-verify intents, newest first), a
+  driver seat for the selected thread (phase strip, journal timeline,
+  deploy/next-prompt controls), and a collapsible system drawer holding the
+  ops tables (running/blocked/retrying, limits and tokens, run history).
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
@@ -8,6 +19,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
 
   @runtime_tick_ms 1_000
+
+  @state_filters [
+    {"all", "All"},
+    {"awaiting", "Ask satisfied"},
+    {"queued", "Queued"},
+    {"open", "Open"},
+    {"running", "Running"},
+    {"done", "Done"},
+    {"failed", "Failed"},
+    {"cancelled", "Cancelled"}
+  ]
+
+  # Canonical thread lifecycle milestones for the phase strip (per latest
+  # run cycle): steps are marked done/active/todo from intent state and the
+  # journal events recorded after the last run boundary.
+  @phase_steps [
+    {:queued, "Queued"},
+    {:running, "Agent running"},
+    {:awaiting, "Ask satisfied"},
+    {:deploy, "Deploy & build"},
+    {:deployed, "Deployed"},
+    {:verifying, "Verifying"},
+    {:verdict, "Verdict"}
+  ]
+
+  @deploy_events ~w(delta_emitted build_submitted job_started job_finished)
+  @verdict_events ~w(verify_passed verify_failed verify_unclear)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -19,13 +57,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:payload, payload)
       |> assign(:runs, load_runs())
       |> assign(:now, DateTime.utc_now())
-      |> assign(:intents, intents)
+      |> assign_intents(intents)
       |> assign(:notice, nil)
       |> assign(:notice_timer, nil)
       |> assign(:intents_filter, "all")
-      |> assign(:collapsed, default_collapsed(payload))
-      |> assign(:selected_detail, nil)
+      |> assign(:collapsed, default_collapsed())
+      |> assign(:selected, nil)
+      |> assign(:thread, nil)
       |> assign(:detail, nil)
+      |> assign(:phase, nil)
+      |> assign(:verifications, [])
+      |> assign(:expanded_run, nil)
+      |> assign(:expanded_transcript, [])
       |> assign(:tracked_repos, load_tracked_repos())
 
     if connected?(socket) do
@@ -40,12 +83,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
 
-    socket =
-      socket
-      |> assign(:now, DateTime.utc_now())
-      |> maybe_refresh_detail()
-
-    {:noreply, socket}
+    {:noreply,
+     socket
+     |> assign(:now, DateTime.utc_now())
+     |> maybe_refresh_detail()}
   end
 
   @impl true
@@ -54,9 +95,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
      socket
      |> assign(:payload, load_payload())
      |> assign(:runs, load_runs())
-     |> assign(:intents, load_intents())
+     |> assign(:now, DateTime.utc_now())
+     |> assign_intents(load_intents())
      |> assign(:tracked_repos, load_tracked_repos())
-     |> assign(:now, DateTime.utc_now())}
+     |> sync_seat(false)}
   end
 
   @impl true
@@ -70,14 +112,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
       {:ok, intent} ->
         {:noreply,
          socket
-         |> put_notice(:success, "Intent #{short_id(intent.id)} registered — dispatched.")
-         |> refresh_intents()}
+         |> put_notice(:success, "Thread #{short_id(intent.id)} registered — dispatched.")
+         |> refresh_intents()
+         |> assign(selected: intent.id, expanded_run: nil)
+         |> sync_seat(true)}
 
       {:error, {:missing_field, field}} ->
         {:noreply, put_notice(socket, :error, "Missing required field: #{field}")}
 
       {:error, reason} ->
-        {:noreply, put_notice(socket, :error, "Could not register intent: #{inspect(reason)}")}
+        {:noreply, put_notice(socket, :error, "Could not register thread: #{inspect(reason)}")}
     end
   end
 
@@ -88,7 +132,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         {:noreply,
          socket
          |> put_notice(:success, "Intent #{short_id(id)} cancelled.")
-         |> refresh_intents()}
+         |> refresh_intents()
+         |> sync_seat(false)}
 
       {:error, :invalid_state} ->
         {:noreply, put_notice(socket, :error, "Intent #{short_id(id)} is already terminal.")}
@@ -159,10 +204,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def handle_event("toggle_issue_detail", %{"id" => id}, socket) when is_binary(id) do
-    if socket.assigns.selected_detail == id do
-      {:noreply, assign(socket, selected_detail: nil, detail: nil)}
+    if socket.assigns.selected == id do
+      {:noreply,
+       socket
+       |> assign(selected: nil, expanded_run: nil)
+       |> sync_seat(false)}
     else
-      {:noreply, assign(socket, selected_detail: id, detail: issue_detail_payload(id))}
+      {:noreply,
+       socket
+       |> assign(selected: id, expanded_run: nil)
+       |> sync_seat(true)}
     end
   end
 
@@ -189,7 +240,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
             {:noreply,
              socket
              |> put_notice(:success, "#{short_id(intent.id)} dispatched — agent picked it up.")
-             |> refresh_intents()}
+             |> refresh_intents()
+             |> sync_seat(false)}
 
           {:error, :invalid_state} ->
             {:noreply, put_notice(socket, :error, "#{short_id(id)} is not queued anymore.")}
@@ -204,7 +256,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
             {:noreply,
              socket
              |> put_notice(:success, "Task saved for #{short_id(intent.id)}.")
-             |> refresh_intents()}
+             |> refresh_intents()
+             |> sync_seat(false)}
 
           {:error, :invalid_state} ->
             {:noreply, put_notice(socket, :error, "#{short_id(id)} is not queued anymore.")}
@@ -220,6 +273,115 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   def handle_event("queued_task", _params, socket) do
     {:noreply, put_notice(socket, :error, "Missing intent id.")}
+  end
+
+  @impl true
+  def handle_event("deploy_intent", %{"id" => id}, socket) when is_binary(id) do
+    case SymphonyElixir.Deployer.deploy(id) do
+      {:ok, %{head: head}} ->
+        {:noreply,
+         socket
+         |> put_notice(:success, "Deployed #{head12(head)} — build submitted and tracked.")
+         |> refresh_journal()}
+
+      {:ok, :no_changes} ->
+        {:noreply, put_notice(socket, :error, "Nothing to deploy — the parked workspace holds no changes.")}
+
+      {:error, {:invalid_state, state}} ->
+        {:noreply, put_notice(socket, :error, "Cannot deploy — thread is #{state}; deploy requires ask satisfied.")}
+
+      {:error, :no_parked_workspace} ->
+        {:noreply, put_notice(socket, :error, "Cannot deploy — no parked workspace for this thread.")}
+
+      {:error, :workspace_missing} ->
+        {:noreply, put_notice(socket, :error, "Cannot deploy — the workspace directory is missing.")}
+
+      {:error, reason} ->
+        {:noreply, put_notice(socket, :error, "Deploy failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("deploy_intent", _params, socket) do
+    {:noreply, put_notice(socket, :error, "Missing intent id.")}
+  end
+
+  @impl true
+  def handle_event("send_prompt", %{"thread_id" => id, "description" => description}, socket)
+      when is_binary(id) do
+    trimmed = String.trim(description || "")
+
+    if trimmed == "" do
+      {:noreply, put_notice(socket, :error, "Type the next prompt before sending.")}
+    else
+      case SymphonyElixir.Intents.IntentStore.assign_and_activate_intent(id, %{description: trimmed}) do
+        {:ok, intent} ->
+          {:noreply,
+           socket
+           |> put_notice(:success, "Next prompt sent to #{short_id(intent.id)} — agent resumed.")
+           |> refresh_intents()
+           |> sync_seat(false)}
+
+        {:error, :invalid_state} ->
+          {:noreply, put_notice(socket, :error, "#{short_id(id)} is not awaiting anymore.")}
+
+        {:error, reason} ->
+          {:noreply, put_notice(socket, :error, "Could not send prompt: #{inspect(reason)}")}
+      end
+    end
+  end
+
+  def handle_event("send_prompt", _params, socket) do
+    {:noreply, put_notice(socket, :error, "Missing thread id.")}
+  end
+
+  @impl true
+  def handle_event("close_thread", %{"id" => id}, socket) when is_binary(id) do
+    case SymphonyElixir.Intents.IntentStore.close_intent(id) do
+      {:ok, _intent} ->
+        {:noreply,
+         socket
+         |> put_notice(:success, "Thread #{short_id(id)} closed.")
+         |> refresh_intents()
+         |> sync_seat(false)}
+
+      {:error, :invalid_state} ->
+        {:noreply, put_notice(socket, :error, "Only an ask-satisfied thread can be closed.")}
+
+      {:error, reason} ->
+        {:noreply, put_notice(socket, :error, "Could not close thread: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("close_thread", _params, socket) do
+    {:noreply, put_notice(socket, :error, "Missing thread id.")}
+  end
+
+  @impl true
+  def handle_event("new_thread", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(selected: nil, expanded_run: nil)
+     |> sync_seat(false)}
+  end
+
+  @impl true
+  def handle_event("toggle_run_transcript", %{"run" => run}, socket) do
+    case Integer.parse(run) do
+      {index, ""} ->
+        expanded = if socket.assigns.expanded_run == index, do: nil, else: index
+
+        {:noreply,
+         socket
+         |> assign(expanded_run: expanded)
+         |> refresh_expanded_transcript()}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("toggle_run_transcript", _params, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -273,8 +435,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
     assign(socket, notice: %{kind: kind, text: text}, notice_timer: timer)
   end
 
+  defp assign_intents(socket, intents) do
+    socket
+    |> assign(:intents, intents)
+    |> assign(:threads, thread_list(intents))
+  end
+
   defp refresh_intents(socket) do
-    assign(socket, :intents, load_intents())
+    assign_intents(socket, load_intents())
   end
 
   defp short_id(id) when is_binary(id) do
@@ -286,37 +454,339 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp short_id(id), do: to_string(id)
 
-  defp default_collapsed(payload) do
-    MapSet.new()
-    |> maybe_collapse(payload, :rate_limits, &(Map.get(&1, :rate_limits) in [nil, "n/a"]))
-    |> maybe_collapse(payload, :running, fn p -> Map.get(p, :running) in [nil, []] end)
-    |> maybe_collapse(payload, :blocked, fn p -> Map.get(p, :blocked) in [nil, []] end)
-    |> maybe_collapse(payload, :retrying, fn p -> Map.get(p, :retrying) in [nil, []] end)
+  defp default_collapsed do
+    MapSet.new(["drawer"])
   end
 
-  defp maybe_collapse(set, payload, key, when_collapsed?) do
-    if when_collapsed?.(payload), do: MapSet.put(set, to_string(key)), else: set
+  # ── Seat (selected thread) sync ────────────────────────────────────────
+
+  # Re-resolve the selected thread struct and its verification passes from
+  # the current intent list. With reload?=true the journal detail is read
+  # again immediately; otherwise only the in-memory projections (thread,
+  # verifications, phase) are recomputed — the 1s tick refreshes detail.
+  defp sync_seat(socket, reload?) do
+    intents = socket.assigns.intents
+
+    case socket.assigns.selected do
+      nil ->
+        assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], expanded_run: nil, expanded_transcript: [])
+
+      id ->
+        case Enum.find(intents, &(&1.id == id and &1.verify_for == nil)) do
+          nil ->
+            assign(socket, thread: nil, detail: nil, phase: nil, verifications: [], expanded_run: nil, expanded_transcript: [])
+
+          thread ->
+            verifications = verification_intents(intents, id)
+            socket = socket |> assign(thread: thread, verifications: verifications)
+
+            if reload? do
+              refresh_journal(socket)
+            else
+              refresh_phase(socket)
+            end
+        end
+    end
   end
+
+  defp refresh_phase(socket) do
+    case {socket.assigns.thread, socket.assigns.detail} do
+      {nil, _detail} -> assign(socket, :phase, nil)
+      {thread, detail} -> assign(socket, :phase, phase_for(thread, detail, socket.assigns.verifications))
+    end
+  end
+
+  # Journal detail + phase + expanded transcript, re-read from disk.
+  defp refresh_journal(socket) do
+    case socket.assigns.thread do
+      nil ->
+        socket
+
+      thread ->
+        detail = issue_detail_payload(thread.id)
+
+        socket
+        |> assign(detail: detail)
+        |> refresh_phase()
+        |> refresh_expanded_transcript()
+    end
+  end
+
+  defp maybe_refresh_detail(socket), do: refresh_journal(socket)
+
+  defp refresh_expanded_transcript(socket) do
+    case {socket.assigns.thread, socket.assigns.expanded_run} do
+      {nil, _run} -> assign(socket, :expanded_transcript, [])
+      {_thread, nil} -> assign(socket, :expanded_transcript, [])
+      {thread, run_index} -> assign(socket, :expanded_transcript, thread_transcript(thread.id, run_index))
+    end
+  end
+
+  defp thread_list(intents) do
+    intents
+    |> Enum.reject(&verify_intent?/1)
+    |> Enum.sort_by(&intent_sort_epoch/1, :desc)
+  end
+
+  defp verify_intent?(%{verify_for: verify_for}) when is_binary(verify_for), do: true
+  defp verify_intent?(%{labels: labels}), do: "verify" in (labels || [])
+  defp verify_intent?(_), do: false
+
+  defp verification_intents(intents, thread_id) do
+    intents
+    |> Enum.filter(&(&1.verify_for == thread_id))
+    |> Enum.sort_by(&intent_sort_epoch/1, :desc)
+  end
+
+  defp thread_for_id(threads, id) do
+    Enum.find(threads, &(&1.id == id))
+  end
+
+  defp thread_transcript(identifier, run_index) do
+    if SymphonyElixir.RunJournal.enabled?() do
+      try do
+        SymphonyElixir.RunJournal.transcript_events(
+          SymphonyElixir.RunJournal.root(),
+          identifier,
+          run_index,
+          80
+        )
+      rescue
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
+  # ── Phase strip ────────────────────────────────────────────────────────
+
+  defp phase_for(thread, detail, verifications) do
+    events = detail_events(detail)
+    all_keys = event_keys(events)
+    tail_keys = event_keys(journal_tail(events))
+    state = thread.state
+
+    verifying_open? =
+      Enum.any?(verifications, &(&1.state in ~w(queued open running awaiting)))
+
+    current =
+      cond do
+        state == "queued" -> :queued
+        state in ~w(open running) -> :running
+        state in ~w(done failed cancelled) -> :terminal
+        true -> awaiting_subphase(tail_keys, verifying_open?)
+      end
+
+    chips =
+      Enum.map(@phase_steps, fn {key, label} ->
+        %{key: key, label: label, status: step_status(key, state, current, all_keys, tail_keys, events, verifying_open?)}
+      end)
+
+    %{
+      current: current,
+      chips: chips,
+      hint: phase_hint(current, state),
+      verdict: tail_verdict(journal_tail(events)),
+      terminal: terminal_info(state)
+    }
+  end
+
+  defp awaiting_subphase(tail_keys, verifying_open?) do
+    cond do
+      Enum.any?(@verdict_events, &(&1 in tail_keys)) -> :verdict
+      verifying_open? or "verification_started" in tail_keys -> :verifying
+      "build_succeeded" in tail_keys -> :deployed
+      Enum.any?(@deploy_events, &(&1 in tail_keys)) -> :deploy
+      true -> :awaiting
+    end
+  end
+
+  defp step_status(:queued, state, _current, _all_keys, _tail_keys, _events, _verifying_open?) do
+    if state == "queued", do: :active, else: :todo
+  end
+
+  defp step_status(:running, state, _current, all_keys, _tail_keys, _events, _verifying_open?) do
+    cond do
+      state in ~w(open running) -> :active
+      state in ~w(awaiting done) -> :done
+      state == "failed" -> :done
+      "run_started" in all_keys -> :done
+      true -> :todo
+    end
+  end
+
+  defp step_status(:awaiting, state, current, _all_keys, _tail_keys, events, _verifying_open?) do
+    cond do
+      state == "awaiting" and current == :awaiting -> :active
+      current in [:deploy, :deployed, :verifying, :verdict] -> :done
+      state == "done" -> :done
+      state in ~w(failed cancelled) and completed_run?(events) -> :done
+      true -> :todo
+    end
+  end
+
+  defp step_status(:deploy, _state, current, _all_keys, tail_keys, _events, _verifying_open?) do
+    if Enum.any?(@deploy_events, &(&1 in tail_keys)) do
+      if current == :deploy, do: :active, else: :done
+    else
+      :todo
+    end
+  end
+
+  defp step_status(:deployed, _state, current, _all_keys, tail_keys, _events, _verifying_open?) do
+    if "build_succeeded" in tail_keys do
+      if current == :deployed, do: :active, else: :done
+    else
+      :todo
+    end
+  end
+
+  defp step_status(:verifying, _state, current, _all_keys, tail_keys, _events, verifying_open?) do
+    if verifying_open? or "verification_started" in tail_keys do
+      if current == :verifying, do: :active, else: :done
+    else
+      :todo
+    end
+  end
+
+  defp step_status(:verdict, _state, current, _all_keys, tail_keys, _events, _verifying_open?) do
+    if Enum.any?(@verdict_events, &(&1 in tail_keys)) do
+      if current == :verdict, do: :active, else: :done
+    else
+      :todo
+    end
+  end
+
+  defp completed_run?(events) do
+    events
+    |> Enum.reverse()
+    |> Enum.find(&(journal_field(&1, "event") == "run_finished"))
+    |> Kernel.then(fn event ->
+      case event do
+        nil -> false
+        event -> journal_field(event, "status") not in [nil, "failed", "blocked", "cancelled"]
+      end
+    end)
+  end
+
+  defp phase_hint(:queued, _state),
+    do: "Queued — assign a task below to dispatch this thread to the agent."
+
+  defp phase_hint(:running, _state), do: "Agent working — workspace events stream below in real time."
+  defp phase_hint(:awaiting, _state), do: "Ask satisfied — deploy the workspace or send the next prompt."
+  defp phase_hint(:deploy, _state), do: "Delta emitted — build submitted; watching the watch pipeline."
+  defp phase_hint(:deployed, _state), do: "Build succeeded — image published; auto-verification is next."
+  defp phase_hint(:verifying, _state), do: "Verification pass running against the built head."
+  defp phase_hint(:verdict, _state), do: "Verification finished — the verdict and evidence are below."
+
+  defp phase_hint(:terminal, state) do
+    case state do
+      "done" -> "Thread closed. Start a new thread to begin another ask."
+      "failed" -> "Thread ended in failure. Start a new thread for a fresh ask."
+      "cancelled" -> "Thread cancelled."
+    end
+  end
+
+  defp terminal_info(nil), do: nil
+
+  defp terminal_info(state) when state in ~w(done failed cancelled) do
+    label =
+      case state do
+        "done" -> "Closed"
+        "failed" -> "Failed"
+        "cancelled" -> "Cancelled"
+      end
+
+    %{state: state, label: label}
+  end
+
+  defp terminal_info(_state), do: nil
+
+  defp detail_events(%{events: events}) when is_list(events), do: events
+  defp detail_events(_detail), do: []
+
+  defp event_keys(events) do
+    events
+    |> Enum.map(&journal_field(&1, "event"))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  # Events recorded after the last run boundary: the current cycle's
+  # deploy/build/verify activity that follows an ask-satisfied run.
+  defp journal_tail(events) do
+    case Enum.with_index(events)
+         |> Enum.reverse()
+         |> Enum.find(fn {event, _i} ->
+           journal_field(event, "event") in ~w(run_finished issue_terminal)
+         end) do
+      nil -> events
+      {_event, index} -> Enum.drop(events, index + 1)
+    end
+  end
+
+  defp tail_verdict([]), do: nil
+
+  defp tail_verdict(events) do
+    events
+    |> Enum.reverse()
+    |> Enum.find(fn event -> journal_field(event, "event") in @verdict_events end)
+  end
+
+  defp thread_state_label(state) do
+    case state do
+      "awaiting" -> "ask satisfied"
+      "running" -> "running"
+      other -> other
+    end
+  end
+
+  defp thread_state_chip_class(state) do
+    case state do
+      "awaiting" -> "state-badge state-badge-awaiting wb-pulse"
+      _ -> intent_state_badge_class(state)
+    end
+  end
+
+  # ── Render ──────────────────────────────────────────────────────────────
 
   @impl true
   def render(assigns) do
     ~H"""
-    <section class="dashboard-shell">
-      <header class="hero-card">
-        <div class="hero-grid">
-          <div>
-            <p class="eyebrow">
-              Symphony Observability
-            </p>
-            <h1 class="hero-title">
-              Operations Dashboard
-            </h1>
-            <p class="hero-copy">
-              Job queue, agent runs, retry pressure, and token usage for the active Symphony runtime.
-            </p>
+    <section class="wb-shell">
+      <header class="wb-topbar">
+        <div class="wb-brand">
+          <p class="eyebrow">Symphony Workbench</p>
+          <h1 class="wb-title">Thread Harness</h1>
+          <p class="wb-copy">
+            <%= thread_count(@threads, "all") %> thread<%= if thread_count(@threads, "all") == 1, do: "", else: "s" %>
+            · <%= thread_count(@threads, "awaiting") %> ask satisfied
+            · <%= thread_count(@threads, "queued") %> queued
+            · <%= verify_count(@intents) %> verification <%= if verify_count(@intents) == 1, do: "pass", else: "passes" %>
+          </p>
+        </div>
+
+        <div class="wb-topbar-right">
+          <div class="wb-stats">
+            <span class="wb-stat">
+              <span class="wb-stat-label">Running</span>
+              <span class="wb-stat-value numeric"><%= payload_count(@payload, :running) %></span>
+            </span>
+            <span class="wb-stat">
+              <span class="wb-stat-label">Blocked</span>
+              <span class="wb-stat-value numeric"><%= payload_count(@payload, :blocked) %></span>
+            </span>
+            <span class="wb-stat">
+              <span class="wb-stat-label">Retrying</span>
+              <span class="wb-stat-value numeric"><%= payload_count(@payload, :retrying) %></span>
+            </span>
+            <span class="wb-stat">
+              <span class="wb-stat-label">Tokens</span>
+              <span class="wb-stat-value numeric"><%= payload_tokens(@payload) %></span>
+            </span>
           </div>
 
-          <div class="status-stack">
+          <div class="status-stack wb-live-stack">
             <span class="status-badge status-badge-live">
               <span class="status-badge-dot"></span>
               Live
@@ -326,333 +796,596 @@ defmodule SymphonyElixirWeb.DashboardLive do
               Offline
             </span>
           </div>
+
+          <span class="wb-now mono" title={DateTime.to_iso8601(@now)}><%= clock(@now) %> UTC</span>
+
+          <div class="wb-actions">
+            <button
+              type="button"
+              class="collapse-toggle wb-ops-toggle"
+              phx-click="toggle_section"
+              phx-value-key="drawer"
+              title="Toggle the system drawer (running agents, rate limits, run history)"
+            >
+              <%= if collapsed?(@collapsed, "drawer"), do: "Show ops", else: "Hide ops" %>
+              <span class="chip-count"><%= ops_count(@payload) %></span>
+            </button>
+            <button type="button" class="primary-button wb-new-thread" phx-click="new_thread" title="Start composing a brand-new thread">
+              New thread
+            </button>
+          </div>
         </div>
       </header>
 
+      <%= if @notice do %>
+        <p class={notice_class(@notice.kind)} role="status">
+          <%= @notice.text %>
+          <button type="button" class="notice-dismiss" phx-click="dismiss_notice" aria-label="Dismiss">×</button>
+        </p>
+      <% end %>
+
       <%= if @payload[:error] do %>
         <section class="error-card">
-          <h2 class="error-title">
-            Snapshot unavailable
-          </h2>
+          <h2 class="error-title">Snapshot unavailable</h2>
           <p class="error-copy">
             <strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %>
           </p>
         </section>
-      <% else %>
-        <section class="metric-grid">
-          <article class="metric-card">
-            <p class="metric-label">Running</p>
-            <p class="metric-value numeric"><%= @payload.counts.running %></p>
-            <p class="metric-detail">Active issue sessions in the current runtime.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Retrying</p>
-            <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
-            <p class="metric-detail">Issues waiting for the next retry window.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Blocked</p>
-            <p class="metric-value numeric"><%= @payload.counts.blocked %></p>
-            <p class="metric-detail">Issues paused for operator input or approval.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Total tokens</p>
-            <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
-            <p class="metric-detail numeric">
-              In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
-            </p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Runtime</p>
-            <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
-          </article>
-        </section>
-
       <% end %>
 
-      <section class="section-card">
-        <div class="section-header">
+      <div class="wb-body">
+        <aside class="wb-rail">
+          <div class="wb-rail-head">
+            <span class="wb-rail-title">Threads</span>
+            <button type="button" class="wb-rail-new" phx-click="new_thread" title="Start a brand-new thread">
+              New thread
+            </button>
+          </div>
+
+          <div class="rail-filter" role="group" aria-label="Filter threads by state">
+            <button
+              :for={{state, label} <- state_filters()}
+              type="button"
+              class={filter_chip_class(@intents_filter, state)}
+              phx-click="filter_intents"
+              phx-value-state={state}
+            >
+              <%= label %>
+              <span class="chip-count"><%= thread_count(@threads, state) %></span>
+            </button>
+          </div>
+
+          <div class="rail-list">
+            <%= for intent <- displayed_threads(@threads, @intents_filter) do %>
+              <button
+                type="button"
+                class={thread_row_class(@selected, intent)}
+                phx-click="toggle_issue_detail"
+                phx-value-id={intent.id}
+                title={intent.description || intent.title}
+              >
+                <span class="thread-row-title"><%= intent.title %></span>
+                <span class="thread-row-sub">
+                  <span><%= short_repo(intent.repo) %></span>
+                  <span>·</span>
+                  <span class="mono numeric" title={intent_stamp(intent) || ""}><%= rel_time(intent_stamp(intent), @now) %></span>
+                </span>
+                <span class={thread_state_chip_class(intent.state)}>
+                  <%= thread_state_label(intent.state) %>
+                </span>
+              </button>
+            <% end %>
+
+            <%= if displayed_threads(@threads, @intents_filter) == [] do %>
+              <p class="rail-empty">
+                <%= if @intents_filter == "all" do
+                  "No threads yet. Start one below."
+                else
+                  "No #{@intents_filter} threads."
+                end %>
+              </p>
+            <% end %>
+          </div>
+        </aside>
+
+        <section class="wb-seat">
+          <%= if @thread == nil do %>
+            <.compose_hero tracked_repos={@tracked_repos} />
+          <% else %>
+            <.driver_seat thread={@thread} detail={@detail} phase={@phase} verifications={@verifications} now={@now} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} />
+          <% end %>
+        </section>
+      </div>
+
+      <.system_drawer payload={@payload} runs={@runs} threads={@threads} selected={@selected} collapsed={@collapsed} now={@now} />
+    </section>
+    """
+  end
+
+  attr(:tracked_repos, :list, default: [])
+
+  defp compose_hero(assigns) do
+    ~H"""
+    <div class="seat-compose">
+      <div class="compose-head">
+        <p class="eyebrow">No thread selected</p>
+        <h2 class="compose-title">Start a new thread</h2>
+        <p class="compose-copy">
+          Describe the ask — the pi agent works on a real checkout in its workspace. When the
+          run parks on ask satisfied, open the thread here to deploy the changes or send the
+          next prompt to resume the same session.
+        </p>
+      </div>
+
+      <div class="compose-grid">
+        <form class="intent-form compose-form" phx-submit="register_intent">
+          <h3 class="queue-title">New thread</h3>
+          <label class="intent-form-field">
+            <span>Title</span>
+            <input class="intent-form-input" type="text" name="title" required placeholder="e.g. Implement the retry backoff" />
+          </label>
+          <div class="intent-form-row">
+            <label class="intent-form-field intent-form-field-repo">
+              <span>Repo (optional)</span>
+              <input class="intent-form-input" type="text" name="repo" placeholder="milady/project" />
+            </label>
+            <label class="intent-form-field intent-form-field-labels">
+              <span>Labels (comma)</span>
+              <input class="intent-form-input" type="text" name="labels" placeholder="symphony-pilot, infra" />
+            </label>
+          </div>
+          <label class="intent-form-field">
+            <span>First prompt</span>
+            <textarea
+              class="intent-form-input"
+              name="description"
+              rows="3"
+              placeholder="What the agent should accomplish in this thread."
+            ></textarea>
+          </label>
           <div>
-            <h2 class="section-title">Intents &amp; job queue</h2>
-            <p class="section-copy">
-              Queue repos or dispatch single jobs, then watch them run. Queued
-              jobs wait here until you assign a task and run them; open jobs are
-              picked up by the orchestrator automatically.
+            <button class="primary-button" type="submit" phx-disable-with="Registering…">Start thread</button>
+          </div>
+        </form>
+
+        <div class="compose-column">
+          <div class="queue-chips compose-chips">
+            <h3 class="queue-title">Tracked on sandman</h3>
+            <p class="form-hint">
+              Repos with a build-bus watch pipeline on the control plane — click a chip to queue a new thread against its latest mirror.
             </p>
+
+            <%= if @tracked_repos == [] do %>
+              <p class="empty-state">No tracked repos (SANDMAN_ADDR unset or nothing watched).</p>
+            <% else %>
+              <div class="queue-chips-list">
+                <button
+                  :for={tracked <- @tracked_repos}
+                  type="button"
+                  class="queue-chip"
+                  phx-click="queue_tracked_repo"
+                  phx-value-repo={tracked.git_url || tracked.repo}
+                  phx-value-state={tracked.watch_state}
+                  title={"Queue a repo job against #{tracked.repo} (#{tracked.git_url || tracked.repo}; watch pipeline #{tracked.watch_pipeline} — #{tracked.watch_state})"}
+                >
+                  <span><%= tracked.repo %></span>
+                  <span class="chip-count"><%= tracked.watch_state %></span>
+                </button>
+              </div>
+            <% end %>
           </div>
-          <div class="section-summary">
-            <span class={intent_state_badge_class("queued")}><%= count_state(@intents, "queued") %> queued</span>
-            <span class={intent_state_badge_class("running")}><%= count_state(@intents, "open") + count_state(@intents, "running") %> active</span>
-          </div>
-        </div>
 
-        <%= if @notice do %>
-          <p class={notice_class(@notice.kind)} role="status">
-            <%= @notice.text %>
-            <button type="button" class="notice-dismiss" phx-click="dismiss_notice" aria-label="Dismiss">×</button>
-          </p>
-        <% end %>
-
-        <div class="intent-forms-grid">
-          <form class="intent-form" phx-submit="register_intent">
-            <h3 class="queue-title">New job</h3>
-            <label class="intent-form-field">
-              <span>Title</span>
-              <input class="intent-form-input" type="text" name="title" required placeholder="e.g. Publish release notes" />
-            </label>
-            <div class="intent-form-row">
-              <label class="intent-form-field intent-form-field-repo">
-                <span>Repo (optional)</span>
-                <input class="intent-form-input" type="text" name="repo" placeholder="milady/project" />
-              </label>
-              <label class="intent-form-field intent-form-field-labels">
-                <span>Labels (comma)</span>
-                <input class="intent-form-input" type="text" name="labels" placeholder="symphony-pilot, infra" />
-              </label>
-            </div>
-            <label class="intent-form-field">
-              <span>Description</span>
-              <textarea
-                class="intent-form-input"
-                name="description"
-                rows="2"
-                placeholder="What the agent should accomplish for this job."
-              ></textarea>
-            </label>
-            <div>
-              <button class="primary-button" type="submit" phx-disable-with="Registering…">Register job</button>
-            </div>
-          </form>
-
-          <form class="intent-form" phx-submit="queue_repos">
-            <h3 class="queue-title">Queue repositories</h3>
-            <p class="form-hint">One URL or owner/name per line — comma or newline separated. Each becomes a queued job awaiting a task.</p>
+          <form class="intent-form compose-form compose-batch" phx-submit="queue_repos">
+            <h3 class="queue-title">Batch queue repos</h3>
+            <p class="form-hint">One URL or owner/name per line — each becomes a queued thread awaiting a task in the rail.</p>
             <label class="intent-form-field">
               <span>Repos</span>
               <textarea
                 class="intent-form-input"
                 name="repos"
-                rows="4"
+                rows="3"
                 placeholder={"e.g.\ngit@github.com:theycallmeloki/sandman.git\nhttps://github.com/theycallmeloki/symphony.git"}
               ></textarea>
             </label>
             <div>
-              <button class="primary-button" type="submit" phx-disable-with="Queuing…">Queue repos as intents</button>
+              <button class="primary-button" type="submit" phx-disable-with="Queuing…">Queue as threads</button>
             </div>
           </form>
         </div>
+      </div>
+    </div>
+    """
+  end
 
-        <div class="queue-chips">
-          <h3 class="queue-title">Tracked on sandman</h3>
-          <p class="form-hint">
-            Repos with a build-bus watch pipeline on the control plane — click a chip to queue a repo job against its latest mirror.
+  attr(:thread, :map, required: true)
+  attr(:detail, :map, default: nil)
+  attr(:phase, :map, default: nil)
+  attr(:verifications, :list, default: [])
+  attr(:expanded_run, :integer, default: nil)
+  attr(:expanded_transcript, :list, default: [])
+  attr(:now, :map, required: true)
+
+  defp driver_seat(assigns) do
+    ~H"""
+    <div class="seat-head">
+      <div class="seat-title-block">
+        <div class="seat-title-row">
+          <h2 class="seat-title"><%= @thread.title %></h2>
+          <span class={thread_state_chip_class(@thread.state)}><%= thread_state_label(@thread.state) %></span>
+        </div>
+        <div class="seat-sub">
+          <span class="mono seat-id" title={@thread.id}><%= short_id(@thread.id) %></span>
+          <%= if @thread.repo do %>
+            <span class="seat-repo"><%= @thread.repo %></span>
+          <% end %>
+          <span class="muted">updated <span class="mono numeric" title={intent_stamp(@thread) || ""}><%= rel_time(intent_stamp(@thread), @now) %></span></span>
+          <a class="issue-link" href={"/api/v1/intents/#{@thread.id}"}>intent JSON</a>
+        </div>
+      </div>
+
+      <div class="seat-actions">
+        <%= if @thread.state in ~w(open running queued) do %>
+          <button
+            type="button"
+            class="subtle-button"
+            phx-click="cancel_intent"
+            phx-value-id={@thread.id}
+            data-confirm="Cancel this thread?"
+          >Cancel</button>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="seat-body">
+      <div class="phase-card">
+        <div class="phase-track">
+          <%= for step <- phase_chips(@phase) do %>
+            <span class={phase_step_class(step)}>
+              <%= step.label %>
+            </span>
+          <% end %>
+        </div>
+
+        <div class="seat-state-block">
+          <%= cond do %>
+            <% @thread.state == "awaiting" and @phase != nil and @phase.current == :awaiting -> %>
+              <div class="block-banner">
+                <span class="wb-pulse-dot wb-pulse-dot-amber"></span>
+                <div>
+                  <span class="block-title">Ask satisfied — thread parked</span>
+                  <span class="block-copy">
+                    The agent believes the ask is done and its workspace is dirty. Deploy the
+                    workspace, or send the next prompt to resume this thread.
+                  </span>
+                </div>
+              </div>
+
+            <% @phase && @phase.current in [:deploy, :deployed, :verifying, :verdict] -> %>
+              <p class="phase-caption">
+                <%= @phase.hint %>
+                <span class="muted">— the thread is still parked on ask satisfied; deploy or send the next prompt whenever ready.</span>
+              </p>
+
+            <% @thread.state == "queued" -> %>
+              <p class="phase-caption">Queued — this thread is waiting for a task. Assign one below to dispatch it.</p>
+
+            <% @thread.state in ~w(open running) -> %>
+              <div class="working-indicator">
+                <span class="wb-pulse-dot"></span>
+                Agent working — workspace events stream below.
+              </div>
+
+            <% @phase && @phase.current == :terminal && @phase.terminal -> %>
+              <div class="terminal-banner">
+                <span class={phase_terminal_class(@phase.terminal.state)}><%= @phase.terminal.label %></span>
+                <span class="muted"><%= @phase.hint %></span>
+              </div>
+
+            <% true -> %>
+          <% end %>
+        </div>
+
+        <%= if @phase && @phase.verdict do %>
+          <.verdict_bar event={@phase.verdict} />
+        <% end %>
+      </div>
+
+      <.seat_controls thread={@thread} phase={@phase} />
+
+      <div class="verifications-block">
+        <h3 class="queue-title">Verification passes</h3>
+
+        <%= if @verifications == [] do %>
+          <p class="empty-state compact">
+            <%= if @thread.state == "awaiting", do: "No verification yet — deploy this thread to trigger an auto-verify pass.", else: "No verification passes recorded for this thread." %>
+          </p>
+        <% else %>
+          <div class="verify-list">
+            <div
+              :for={verify <- @verifications}
+              class="verify-entry"
+              title={verify.description || verify.title}
+            >
+              <span class={intent_state_badge_class(verify.state)}><%= verify.state %></span>
+              <span class="verify-title"><%= verify.title %></span>
+              <span class="mono numeric verify-time"><%= rel_time(intent_stamp(verify), @now) %></span>
+              <a class="issue-link" href={"/api/v1/intents/#{verify.id}"}>details</a>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <.journal_block detail={@detail} expanded_run={@expanded_run} expanded_transcript={@expanded_transcript} now={@now} />
+    </div>
+    """
+  end
+
+  attr(:event, :map, required: true)
+
+  defp verdict_bar(assigns) do
+    ~H"""
+    <div class={verdict_bar_class(@event)}>
+      <div class="verdict-head">
+        <span class={verdict_head_class(@event)}>
+          <%= verdict_head_label(@event) %>
+        </span>
+        <span class="mono verdict-meta">
+          <%= if journal_field(@event, "verify_intent") do %>
+            verify <%= short_id(journal_field(@event, "verify_intent")) %>
+          <% end %>
+          <%= if journal_field(@event, "head") do %>
+            · <%= head12(journal_field(@event, "head")) %>
+          <% end %>
+        </span>
+      </div>
+      <div class="verdict-evidence">
+        <%= verdict_evidence(@event) %>
+      </div>
+    </div>
+    """
+  end
+
+  attr(:thread, :map, required: true)
+  attr(:phase, :map, default: nil)
+
+  defp seat_controls(assigns) do
+    ~H"""
+    <div class="seat-controls">
+      <%= cond do %>
+        <% @thread.state == "queued" -> %>
+          <div class="controls-row">
+            <div class="controls-block">
+              <h3 class="queue-title">Assign a task</h3>
+              <form class="prompt-form" phx-submit="queued_task">
+                <input type="hidden" name="intent_id" value={@thread.id} />
+                <textarea
+                  class="intent-form-input prompt-input"
+                  name="description"
+                  rows="2"
+                  placeholder="What should the agent do with this thread?"
+                ><%= @thread.description || "" %></textarea>
+                <div class="prompt-actions">
+                  <button class="subtle-button" type="submit" name="action" value="save" phx-disable-with="Saving…">Save task</button>
+                  <button class="primary-button" type="submit" name="action" value="run" phx-disable-with="Dispatching…">Assign &amp; run</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+        <% @thread.state in ~w(open running) -> %>
+          <div class="controls-row working-row">
+            <div class="working-indicator">
+              <span class="wb-pulse-dot"></span>
+              Agent working
+            </div>
+            <span class="muted controls-note">Cancel stops the run; the thread cannot be deployed until it parks on ask satisfied.</span>
+          </div>
+
+        <% @thread.state == "awaiting" -> %>
+          <div class="controls-row awaiting-row">
+            <div class="controls-block">
+              <div class="controls-title-row">
+                <h3 class="queue-title">Deploy the workspace</h3>
+                <span class="muted controls-note">Emit the parked edits to the git delta receiver and submit a build.</span>
+              </div>
+              <button
+                type="button"
+                class="primary-button deploy-button"
+                phx-click="deploy_intent"
+                phx-value-id={@thread.id}
+                data-confirm="Deploy this workspace (emit delta and submit build)?"
+                disabled={not deployable_thread?(@thread)}
+                title={if deployable_thread?(@thread), do: "Emit the parked workspace and submit a build", else: "Deploy needs a repo on the thread"}
+              >Deploy &amp; build</button>
+            </div>
+
+            <div class="controls-block">
+              <div class="controls-title-row">
+                <h3 class="queue-title">Next prompt</h3>
+                <span class="muted controls-note">Resumes the same parked agent session in this thread.</span>
+              </div>
+              <form class="prompt-form" phx-submit="send_prompt">
+                <input type="hidden" name="thread_id" value={@thread.id} />
+                <textarea
+                  class="intent-form-input prompt-input"
+                  name="description"
+                  rows="2"
+                  placeholder="Type the next prompt to resume this thread…"
+                ></textarea>
+                <div class="prompt-actions">
+                  <button class="primary-button" type="submit" phx-disable-with="Sending…">Send</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="controls-row secondary-row">
+            <button
+              type="button"
+              class="secondary"
+              phx-click="close_thread"
+              phx-value-id={@thread.id}
+              data-confirm="Close this thread? The parked agent session will be stopped."
+            >Close thread</button>
+            <button
+              type="button"
+              class="subtle-button"
+              phx-click="cancel_intent"
+              phx-value-id={@thread.id}
+              data-confirm="Cancel this thread?"
+            >Cancel</button>
+            <button type="button" class="subtle-button" phx-click="new_thread">Start new thread</button>
+          </div>
+
+        <% @phase && @phase.terminal -> %>
+          <div class="controls-row terminal-row">
+            <p class="empty-state">
+              <%= if @thread.state == "done", do: "This thread is closed — its workspace was parked and the session stopped.", else: "This thread ended as #{@thread.state}." %>
+            </p>
+            <button type="button" class="primary-button" phx-click="new_thread">Start new thread</button>
+          </div>
+
+        <% true -> %>
+      <% end %>
+    </div>
+    """
+  end
+
+  attr(:detail, :map, default: nil)
+  attr(:expanded_run, :integer, default: nil)
+  attr(:expanded_transcript, :list, default: [])
+  attr(:now, :map, required: true)
+
+  defp journal_block(assigns) do
+    ~H"""
+    <div class="journal-block">
+      <h3 class="queue-title">Journal</h3>
+
+      <%= cond do %>
+        <% @detail == nil -> %>
+          <p class="empty-state">Journal loading…</p>
+
+        <% @detail[:error] -> %>
+          <p class="empty-state">
+            No journal detail for this thread yet — the run journal is disabled or nothing has been recorded.
           </p>
 
-          <%= if @tracked_repos == [] do %>
-            <p class="empty-state">No tracked repos (SANDMAN_ADDR unset or nothing watched).</p>
-          <% else %>
-            <div class="queue-chips-list">
-              <button
-                :for={tracked <- @tracked_repos}
-                type="button"
-                class="queue-chip"
-                phx-click="queue_tracked_repo"
-                phx-value-repo={tracked.git_url || tracked.repo}
-                phx-value-state={tracked.watch_state}
-                title={"Queue a repo job against #{tracked.repo} (#{tracked.git_url || tracked.repo}; watch pipeline #{tracked.watch_pipeline} — #{tracked.watch_state})"}
-              >
-                <span><%= tracked.repo %></span>
-                <span class="chip-count"><%= tracked.watch_state %></span>
-              </button>
+        <% true -> %>
+          <div class="timeline">
+            <%= for event <- journal_timeline(@detail) do %>
+              <div class="timeline-item">
+                <span class="timeline-time mono numeric" title={journal_field(event, "at") || ""}>
+                  <%= rel_time(journal_field(event, "at"), @now) %>
+                </span>
+                <span class={timeline_badge_class(event)}>
+                  <%= journal_event_label(journal_field(event, "event")) %>
+                </span>
+                <span class="timeline-summary event-text" title={journal_event_summary(event)}>
+                  <%= journal_event_summary(event) %>
+                </span>
+              </div>
+            <% end %>
+
+            <%= if journal_timeline(@detail) == [] do %>
+              <p class="empty-state compact">No journal events yet — activity appears as the agent runs.</p>
+            <% end %>
+          </div>
+
+          <div class="journal-runs-block">
+            <h3 class="queue-title">Runs</h3>
+            <%= if @detail.runs == [] do %>
+              <p class="empty-state compact">No run attempts recorded yet.</p>
+            <% else %>
+              <div class="journal-runs">
+                <button
+                  :for={run <- @detail.runs}
+                  type="button"
+                  class={run_chip_class(@expanded_run, run)}
+                  phx-click="toggle_run_transcript"
+                  phx-value-run={run.run_index}
+                  title={"Run #{run.run_index}: #{run.status} · #{run.transcript_event_count} transcript events — click to expand"}
+                >run <%= run.run_index %> — <%= run.status %></button>
+              </div>
+            <% end %>
+          </div>
+
+          <div class="transcript-block">
+            <div class="transcript-head">
+              <h3 class="queue-title">
+                <%= if @expanded_run, do: "Transcript — run #{@expanded_run}", else: "Transcript — latest run tail" %>
+              </h3>
+              <span class="muted transcript-caption">
+                <%= if @expanded_run, do: "refreshed live", else: "streaming tail, refreshed each second" %>
+              </span>
             </div>
+
+            <%= if current_transcript(@expanded_transcript, @expanded_run, @detail) == [] do %>
+              <p class="empty-state compact">No agent transcript entries recorded for this run yet.</p>
+            <% else %>
+              <pre class="code-panel transcript-panel"><%= journal_transcript_panel(current_transcript(@expanded_transcript, @expanded_run, @detail), @now) %></pre>
+            <% end %>
+          </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  attr(:payload, :map, default: nil)
+  attr(:runs, :map, default: nil)
+  attr(:threads, :list, default: [])
+  attr(:selected, :string, default: nil)
+  attr(:collapsed, :map, default: nil)
+  attr(:now, :map, required: true)
+
+  defp system_drawer(assigns) do
+    ~H"""
+    <aside class={"wb-drawer" <> if collapsed?(@collapsed, "drawer"), do: "", else: " wb-drawer-open"}>
+      <div class="drawer-head">
+        <div>
+          <span class="drawer-title">System</span>
+          <span class="muted drawer-sub">running · blocked · limits · history</span>
+        </div>
+        <button type="button" class="collapse-toggle" phx-click="toggle_section" phx-value-key="drawer">Close</button>
+      </div>
+
+      <div class="drawer-body">
+        <div class="ops-card">
+          <h3 class="queue-title">Limits &amp; tokens</h3>
+          <%= if @payload[:error] do %>
+            <p class="empty-state">Snapshot unavailable.</p>
+          <% else %>
+            <div class="token-stack ops-tokens">
+              <span>Total: <span class="mono numeric"><%= format_int(@payload.codex_totals.total_tokens) %></span></span>
+              <span class="muted">
+                In <span class="mono numeric"><%= format_int(@payload.codex_totals.input_tokens) %></span>
+                / Out <span class="mono numeric"><%= format_int(@payload.codex_totals.output_tokens) %></span>
+                · runtime <span class="mono numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></span>
+              </span>
+            </div>
+            <%= if Map.get(@payload, :rate_limits) not in [nil, "n/a"] do %>
+              <details class="ops-details">
+                <summary>Rate limits</summary>
+                <pre class="code-panel ops-pre"><%= pretty_value(@payload.rate_limits) %></pre>
+              </details>
+            <% else %>
+              <p class="empty-state compact">No upstream rate-limit snapshot available.</p>
+            <% end %>
           <% end %>
         </div>
 
-        <div class="queue-block">
-          <h3 class="queue-title">Queued — waiting for a task</h3>
-
-          <%= if count_state(@intents, "queued") == 0 do %>
-            <p class="empty-state">Nothing queued. Paste repo references in the queue form above, or click a tracked repo above to queue a repo job.</p>
-          <% else %>
-            <div class="queue-list">
-              <%= for intent <- queued_intents(@intents) do %>
-                <div class="queue-card">
-                  <div class="queue-card-head">
-                    <div class="issue-stack">
-                      <span class="issue-id"><%= short_id(intent.id) %></span>
-                      <span class="intent-title" title={intent.repo || intent.title}><%= intent.title %></span>
-                      <span class="muted queue-repo"><%= short_repo(intent.repo) %></span>
-                    </div>
-                    <div class="queue-card-actions">
-                      <form class="queue-task-form" phx-submit="queued_task">
-                        <input type="hidden" name="intent_id" value={intent.id} />
-                        <textarea
-                          class="intent-form-input queue-task-input"
-                          name="description"
-                          rows="1"
-                          placeholder="What should the agent do with this repo?"
-                        ><%= intent.description %></textarea>
-                        <button class="subtle-button" type="submit" name="action" value="save" phx-disable-with="Saving…">Save task</button>
-                        <button class="primary-button" type="submit" name="action" value="run" phx-disable-with="Dispatching…">Assign &amp; run</button>
-                      </form>
-                      <button
-                        type="button"
-                        class="subtle-button"
-                        phx-click="cancel_intent"
-                        phx-value-id={intent.id}
-                        data-confirm="Remove this queued job?"
-                      >Remove</button>
-                    </div>
-                  </div>
-                </div>
-              <% end %>
-            </div>
-          <% end %>
-        </div>
-
-        <div class="intent-history">
-          <div class="history-head">
-            <h3 class="queue-title">Activity</h3>
-            <div class="filter-row">
-              <button
-                type="button"
-                class={filter_chip_class(@intents_filter, "all")}
-                phx-click="filter_intents"
-                phx-value-state="all"
-              >All <span class="chip-count"><%= nonqueued_count(@intents) %></span></button>
-              <button
-                :for={{state, label} <- [{"open", "Open"}, {"running", "Running"}, {"done", "Done"}, {"failed", "Failed"}, {"cancelled", "Cancelled"}]}
-                type="button"
-                class={filter_chip_class(@intents_filter, state)}
-                phx-click="filter_intents"
-                phx-value-state={state}
-              ><%= label %> <span class="chip-count"><%= count_state(@intents, state) %></span></button>
-            </div>
-          </div>
-
-          <div class="table-wrap">
-            <table class="data-table data-table-intents">
-              <thead>
-                <tr>
-                  <th>Job</th>
-                  <th>State</th>
-                  <th>Repo</th>
-                  <th>Outcome</th>
-                  <th>Updated</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                <%= for intent <- displayed_intents(@intents, @intents_filter) do %>
-                <tr>
-                  <td>
-                    <div class="issue-stack">
-                      <span class="issue-id"><%= short_id(intent.id) %></span>
-                      <span class="intent-title" title={intent.description || intent.title}><%= intent.title %></span>
-                      <a class="issue-link" href={"/api/v1/intents/#{intent.id}"}>JSON details</a>
-                    </div>
-                  </td>
-                  <td>
-                    <span class={intent_state_badge_class(intent.state)}>
-                      <%= intent.state %>
-                    </span>
-                  </td>
-                  <td><%= short_repo(intent.repo) %></td>
-                  <td>
-                    <div class="detail-stack">
-                      <span class="event-text" title={intent_result_summary(intent)}>
-                        <%= intent_result_summary(intent) %>
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    <span class="mono numeric" title={intent_stamp(intent) || ""}><%= rel_time(intent_stamp(intent), @now) %></span>
-                  </td>
-                  <td>
-                    <%= if intent.state in ["open", "running"] do %>
-                      <button
-                        type="button"
-                        class="subtle-button"
-                        phx-click="cancel_intent"
-                        phx-value-id={intent.id}
-                        data-confirm="Cancel this job?"
-                      >Cancel</button>
-                    <% end %>
-                  </td>
-                </tr>
-                <% end %>
-                <%= if nonqueued_count(@intents) == 0 or (displayed_intents(@intents, @intents_filter) == []) do %>
-                  <tr>
-                    <td colspan="6" class="empty-state">No <%= if @intents_filter == "all", do: "", else: "#{@intents_filter} " %>jobs yet.</td>
-                  </tr>
-                <% end %>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <%= unless @payload[:error] do %>
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Rate limits</h2>
-              <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
-            </div>
-            <button type="button" class="collapse-toggle" phx-click="toggle_section" phx-value-key="rate_limits">
-              <%= if collapsed?(@collapsed, "rate_limits"), do: "Expand", else: "Collapse" %>
-            </button>
-          </div>
-
-          <%= if collapsed?(@collapsed, "rate_limits") do %>
-            <p class="collapse-summary mono"><%= truncate_text(pretty_value(@payload.rate_limits), 150) %></p>
-          <% else %>
-            <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
-          <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Running sessions</h2>
-              <p class="section-copy">Active issues, last known agent activity, and token usage.</p>
-            </div>
-            <div class="section-tools">
-              <%= if @payload.running != [] do %>
-                <span class="collapse-count state-badge state-badge-active"><%= length(@payload.running) %> running</span>
-              <% end %>
-              <button type="button" class="collapse-toggle" phx-click="toggle_section" phx-value-key="running">
-                <%= if collapsed?(@collapsed, "running"), do: "Expand", else: "Collapse" %>
-              </button>
-            </div>
-          </div>
-
-          <%= if collapsed?(@collapsed, "running") do %>
-            <p class="collapse-summary"><%= section_summary(@payload.running, "No active sessions.", "session", "Active sessions:") %></p>
-          <% else %>
+        <div class="ops-card">
+          <h3 class="queue-title">Running sessions</h3>
+          <p class="ops-summary">Active agent sessions — last known activity and token usage.</p>
+          <%= unless @payload[:error] do %>
             <%= if @payload.running == [] do %>
               <p class="empty-state">No active sessions.</p>
             <% else %>
               <div class="table-wrap">
-                <table class="data-table data-table-running">
-                  <colgroup>
-                    <col style="width: 12rem;" />
-                    <col style="width: 7.5rem;" />
-                    <col style="width: 7rem;" />
-                    <col style="width: 8rem;" />
-                    <col />
-                    <col style="width: 9.5rem;" />
-                  </colgroup>
+                <table class="data-table ops-table">
                   <thead>
                     <tr>
                       <th>Issue</th>
                       <th>State</th>
-                      <th>Session</th>
                       <th>Runtime</th>
                       <th>Codex update</th>
                       <th>Tokens</th>
@@ -671,30 +1404,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <%= entry.state %>
                         </span>
                       </td>
-                      <td>
-                        <div class="session-stack">
-                          <%= if entry.session_id do %>
-                            <button
-                              type="button"
-                              class="subtle-button"
-                              data-label="Copy ID"
-                              data-copy={entry.session_id}
-                              onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
-                            >
-                              Copy ID
-                            </button>
-                          <% else %>
-                            <span class="muted">n/a</span>
-                          <% end %>
-                        </div>
-                      </td>
                       <td class="numeric"><%= format_runtime_seconds(runtime_seconds_from_started_at(entry.started_at, @now)) %> · <%= entry.turn_count %> turns</td>
                       <td>
                         <div class="detail-stack">
-                          <span
-                            class="event-text"
-                            title={entry.last_message || to_string(entry.last_event || "n/a")}
-                          ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          <span class="event-text" title={entry.last_message || to_string(entry.last_event || "n/a")}>
+                            <%= entry.last_message || to_string(entry.last_event || "n/a") %>
+                          </span>
                           <span class="muted event-meta">
                             <%= entry.last_event || "n/a" %>
                             <%= if entry.last_event_at do %>
@@ -714,33 +1429,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </table>
               </div>
             <% end %>
-          <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Blocked sessions</h2>
-              <p class="section-copy">Issues paused because Codex requested operator input or approval.</p>
-            </div>
-            <button type="button" class="collapse-toggle" phx-click="toggle_section" phx-value-key="blocked">
-              <%= if collapsed?(@collapsed, "blocked"), do: "Expand", else: "Collapse" %>
-            </button>
-          </div>
-
-          <%= if collapsed?(@collapsed, "blocked") do %>
-            <p class="collapse-summary"><%= section_summary(@payload.blocked, "No blocked sessions.", "session", "Blocked:") %></p>
           <% else %>
+            <p class="empty-state">Snapshot unavailable.</p>
+          <% end %>
+        </div>
+
+        <div class="ops-card">
+          <h3 class="queue-title">Blocked sessions</h3>
+          <p class="ops-summary">Issues paused because Codex requested operator input or approval.</p>
+          <%= unless @payload[:error] do %>
             <%= if @payload.blocked == [] do %>
               <p class="empty-state">No blocked sessions.</p>
             <% else %>
               <div class="table-wrap">
-                <table class="data-table" style="min-width: 760px;">
+                <table class="data-table ops-table">
                   <thead>
                     <tr>
                       <th>Issue</th>
                       <th>State</th>
-                      <th>Session</th>
                       <th>Blocked at</th>
                       <th>Last update</th>
                       <th>Error</th>
@@ -759,28 +1465,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <%= entry.state || "Blocked" %>
                         </span>
                       </td>
-                      <td>
-                        <%= if entry.session_id do %>
-                          <button
-                            type="button"
-                            class="subtle-button"
-                            data-label="Copy ID"
-                            data-copy={entry.session_id}
-                            onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
-                          >
-                            Copy ID
-                          </button>
-                        <% else %>
-                          <span class="muted">n/a</span>
-                        <% end %>
-                      </td>
                       <td class="mono numeric" title={entry.blocked_at || ""}><%= rel_time(entry.blocked_at, @now) %></td>
                       <td>
                         <div class="detail-stack">
-                          <span
-                            class="event-text"
-                            title={entry.last_message || to_string(entry.last_event || "n/a")}
-                          ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          <span class="event-text" title={entry.last_message || to_string(entry.last_event || "n/a")}>
+                            <%= entry.last_message || to_string(entry.last_event || "n/a") %>
+                          </span>
                           <span class="muted event-meta">
                             <%= entry.last_event || "n/a" %>
                             <%= if entry.last_event_at do %>
@@ -795,28 +1485,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </table>
               </div>
             <% end %>
-          <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Retry queue</h2>
-              <p class="section-copy">Issues waiting for the next retry window.</p>
-            </div>
-            <button type="button" class="collapse-toggle" phx-click="toggle_section" phx-value-key="retrying">
-              <%= if collapsed?(@collapsed, "retrying"), do: "Expand", else: "Collapse" %>
-            </button>
-          </div>
-
-          <%= if collapsed?(@collapsed, "retrying") do %>
-            <p class="collapse-summary"><%= section_summary(@payload.retrying, "No issues are currently backing off.", "issue", "Backing off:") %></p>
           <% else %>
+            <p class="empty-state">Snapshot unavailable.</p>
+          <% end %>
+        </div>
+
+        <div class="ops-card">
+          <h3 class="queue-title">Retry queue</h3>
+          <p class="ops-summary">Issues waiting for the next retry window.</p>
+          <%= unless @payload[:error] do %>
             <%= if @payload.retrying == [] do %>
               <p class="empty-state">No issues are currently backing off.</p>
             <% else %>
               <div class="table-wrap">
-                <table class="data-table" style="min-width: 680px;">
+                <table class="data-table ops-table">
                   <thead>
                     <tr>
                       <th>Issue</th>
@@ -841,175 +1523,78 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </table>
               </div>
             <% end %>
+          <% else %>
+            <p class="empty-state">Snapshot unavailable.</p>
           <% end %>
-        </section>
-      <% end %>
-
-      <section class="section-card">
-        <div class="section-header">
-          <div>
-            <h2 class="section-title">Run history</h2>
-            <p class="section-copy">
-              Durable journal of issue runs and agent sessions —
-              <%= @runs.issue_count %> issues tracked.
-            </p>
-          </div>
         </div>
 
-        <%= if @runs.enabled and @runs.issues != [] do %>
-          <div class="table-wrap">
-            <table class="data-table" style="min-width: 820px;">
-              <colgroup>
-                <col style="width: 12rem;" />
-                <col style="width: 8rem;" />
-                <col style="width: 5rem;" />
-                <col style="width: 6rem;" />
-                <col style="width: 11rem;" />
-                <col />
-                <col style="width: 6.5rem;" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>Issue</th>
-                  <th>Status</th>
-                  <th>Runs</th>
-                  <th>Events</th>
-                  <th>Last event</th>
-                  <th>Last at</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr :for={run <- @runs.issues}>
-                  <td>
-                    <div class="issue-stack">
-                      <span class="issue-id"><%= run.issue_identifier %></span>
-                      <a
-                        class="issue-link"
-                        href={"/api/v1/issues/#{run.issue_identifier}/runs"}
-                      >history JSON</a>
-                    </div>
-                  </td>
-                  <td>
-                    <span class={run_status_badge_class(run.status)}>
-                      <%= run.status %>
-                    </span>
-                  </td>
-                  <td class="numeric"><%= run.run_count %></td>
-                  <td class="numeric"><%= run.event_count %></td>
-                  <td>
-                    <div class="detail-stack">
-                      <span class="event-text" title={run.last_event || "n/a"}><%= run.last_event || "n/a" %></span>
-                    </div>
-                  </td>
-                  <td class="mono numeric" title={run.last_at || ""}><%= rel_time(run.last_at, @now) %></td>
-                  <td>
-                    <button
-                      type="button"
-                      class="subtle-button"
-                      phx-click="toggle_issue_detail"
-                      phx-value-id={run.issue_identifier}
-                    ><%= if @selected_detail == run.issue_identifier, do: "Close", else: "Detail" %></button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        <% else %>
-          <p class="empty-state">
-            <%= if @runs.enabled, do: "No journaled runs yet.", else: "Run journal disabled (observability.run_journal_enabled)." %>
+        <div class="ops-card">
+          <h3 class="queue-title">Run history</h3>
+          <p class="ops-summary">
+            Durable journal of issue runs and agent sessions —
+            <%= if @runs, do: "#{@runs.issue_count} issues", else: "0 issues" %>
+            · <%= run_count(@runs) %> runs · <%= event_count(@runs) %> events.
           </p>
-        <% end %>
-      </section>
 
-      <%= if @selected_detail do %>
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Job detail — <span class="mono"><%= @selected_detail %></span></h2>
-              <p class="section-copy">
-                Live journal for this job: events, run attempts, and the latest agent transcript tail.
-              </p>
+          <%= if @runs && @runs.enabled && @runs.issues != [] do %>
+            <div class="table-wrap">
+              <table class="data-table ops-table">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Status</th>
+                    <th>Runs</th>
+                    <th>Last event</th>
+                    <th>Last at</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={run <- @runs.issues}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= run.issue_identifier %></span>
+                        <a class="issue-link" href={"/api/v1/issues/#{run.issue_identifier}/runs"}>history JSON</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={run_status_badge_class(run.status)}>
+                        <%= run.status %>
+                      </span>
+                    </td>
+                    <td class="numeric"><%= run.run_count %></td>
+                    <td>
+                      <div class="detail-stack">
+                        <span class="event-text" title={run.last_event || "n/a"}><%= run.last_event || "n/a" %></span>
+                      </div>
+                    </td>
+                    <td class="mono numeric" title={run.last_at || ""}><%= rel_time(run.last_at, @now) %></td>
+                    <td>
+                      <%= if thread_for_id(@threads, run.issue_identifier) do %>
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          phx-click="toggle_issue_detail"
+                          phx-value-id={run.issue_identifier}
+                        ><%= if @selected == run.issue_identifier, do: "In seat", else: "Open thread" %></button>
+                      <% end %>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <button
-              type="button"
-              class="subtle-button"
-              phx-click="toggle_issue_detail"
-              phx-value-id={@selected_detail}
-            >Close</button>
-          </div>
-
-          <%= if @detail[:error] do %>
-            <p class="empty-state">
-              No journal detail for this job yet — the run journal is disabled or nothing has been recorded.
-            </p>
           <% else %>
-            <div class="queue-block">
-              <h3 class="queue-title">Events</h3>
-              <div class="table-wrap">
-                <table class="data-table data-table-journal">
-                  <colgroup>
-                    <col style="width: 6.5rem;" />
-                    <col style="width: 12rem;" />
-                    <col />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th>At</th>
-                      <th>Event</th>
-                      <th>Detail</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr :for={event <- @detail.events}>
-                      <td class="mono numeric" title={journal_field(event, "at") || ""}>
-                        <%= rel_time(journal_field(event, "at"), @now) %>
-                      </td>
-                      <td>
-                        <span class={journal_event_badge_class(journal_field(event, "event"))}>
-                          <%= journal_field(event, "event") || "event" %>
-                        </span>
-                      </td>
-                      <td>
-                        <span class="event-text" title={journal_event_summary(event)}>
-                          <%= journal_event_summary(event) %>
-                        </span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div class="queue-block">
-              <h3 class="queue-title">Runs</h3>
-              <%= if @detail.runs == [] do %>
-                <p class="empty-state">No run attempts recorded for this job yet.</p>
-              <% else %>
-                <div class="journal-runs">
-                  <span
-                    :for={run <- @detail.runs}
-                    class={run_status_badge_class(run.status)}
-                    title={"Run #{run.run_index}: #{run.status} · #{run.transcript_event_count} transcript events"}
-                  >run <%= run.run_index %> — <%= run.status %></span>
-                </div>
-              <% end %>
-            </div>
-
-            <div class="queue-block">
-              <h3 class="queue-title">Transcript tail</h3>
-              <%= if @detail.transcript == [] do %>
-                <p class="empty-state">No agent transcript entries recorded for the latest run yet.</p>
-              <% else %>
-                <pre class="code-panel"><%= journal_transcript_panel(@detail.transcript, @now) %></pre>
-              <% end %>
-            </div>
+            <p class="empty-state">
+              <%= if @runs && @runs.enabled, do: "No journaled runs yet.", else: "Run journal disabled (observability.run_journal_enabled)." %>
+            </p>
           <% end %>
-        </section>
-      <% end %>
-    </section>
+        </div>
+      </div>
+    </aside>
     """
   end
+
+  # ── Payload / runs / intents loaders ────────────────────────────────────
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
@@ -1026,40 +1611,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp intent_state_badge_class(state) do
-    base = "state-badge"
-    normalized = state |> to_string() |> String.downcase()
-
-    cond do
-      normalized in ["running", "open"] -> "#{base} state-badge-active"
-      normalized in ["queued"] -> "#{base} state-badge-warning"
-      normalized in ["done", "completed"] -> "#{base} state-badge-done"
-      normalized in ["failed", "blocked", "cancelled"] -> "#{base} state-badge-danger"
-      true -> base
+  defp load_tracked_repos do
+    try do
+      case SymphonyElixir.TrackedRepos.fetch() do
+        {:ok, repos} when is_list(repos) -> repos
+        _ -> []
+      end
+    rescue
+      _ -> []
     end
   end
 
-  defp intent_result_summary(%{state: state, result: result}) when is_map(result) do
-    status = Map.get(result, "status") || Map.get(result, :status)
-
-    cond do
-      is_binary(status) and status == "completed" -> "run completed"
-      is_binary(status) and status == "blocked" -> "blocked"
-      is_binary(status) and status == "failed" -> "run failed"
-      state == "cancelled" -> "cancelled"
-      true -> ""
+  defp issue_detail_payload(identifier) do
+    try do
+      case Presenter.issue_runs_payload(identifier) do
+        {:ok, detail} when is_map(detail) -> detail
+        _ -> %{error: true}
+      end
+    rescue
+      _ -> %{error: true}
     end
   end
-
-  defp intent_result_summary(%{state: state}) when state in ["open", "running"] do
-    case state do
-      "running" -> "in flight"
-      _ -> "waiting for dispatch"
-    end
-  end
-
-  defp intent_result_summary(%{state: "cancelled"}), do: "cancelled"
-  defp intent_result_summary(_intent), do: ""
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
@@ -1069,82 +1641,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
     Endpoint.config(:snapshot_timeout_ms) || 15_000
   end
 
-  attr(:identifier, :string, required: true)
-  attr(:url, :string, default: nil)
-
-  defp issue_identifier(assigns) do
-    assigns = assign(assigns, :href, external_issue_url(assigns.url))
-
-    ~H"""
-    <%= if @href do %>
-      <a
-        class="issue-id issue-id-link"
-        href={@href}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={"Open #{@identifier} in the issue tracker"}
-      ><%= @identifier %></a>
-    <% else %>
-      <span class="issue-id"><%= @identifier %></span>
-    <% end %>
-    """
+  defp schedule_runtime_tick do
+    Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
   end
 
-  defp external_issue_url(url) when is_binary(url) do
-    url = String.trim(url)
+  defp state_filters, do: @state_filters
 
-    case URI.parse(url) do
-      %URI{scheme: scheme, host: host}
-      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
-        url
+  # ── Display helpers (badges, chips, labels) ────────────────────────────
 
-      _ ->
-        nil
+  defp intent_state_badge_class(state) do
+    base = "state-badge"
+    normalized = state |> to_string() |> String.downcase()
+
+    cond do
+      normalized in ["awaiting"] -> "#{base} state-badge-awaiting wb-pulse"
+      normalized in ["running", "open"] -> "#{base} state-badge-active"
+      normalized in ["queued"] -> "#{base} state-badge-warning"
+      normalized in ["done", "completed"] -> "#{base} state-badge-done"
+      normalized in ["failed", "blocked", "cancelled"] -> "#{base} state-badge-danger"
+      true -> base
     end
   end
-
-  defp external_issue_url(_url), do: nil
-
-  defp completed_runtime_seconds(payload) do
-    payload.codex_totals.seconds_running || 0
-  end
-
-  defp total_runtime_seconds(payload, now) do
-    completed_runtime_seconds(payload) +
-      Enum.reduce(payload.running, 0, fn entry, total ->
-        total + runtime_seconds_from_started_at(entry.started_at, now)
-      end)
-  end
-
-  defp format_runtime_seconds(seconds) when is_number(seconds) do
-    whole_seconds = max(trunc(seconds), 0)
-    mins = div(whole_seconds, 60)
-    secs = rem(whole_seconds, 60)
-    "#{mins}m #{secs}s"
-  end
-
-  defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
-    DateTime.diff(now, started_at, :second)
-  end
-
-  defp runtime_seconds_from_started_at(started_at, %DateTime{} = now) when is_binary(started_at) do
-    case DateTime.from_iso8601(started_at) do
-      {:ok, parsed, _offset} -> runtime_seconds_from_started_at(parsed, now)
-      _ -> 0
-    end
-  end
-
-  defp runtime_seconds_from_started_at(_started_at, _now), do: 0
-
-  defp format_int(value) when is_integer(value) do
-    value
-    |> Integer.to_string()
-    |> String.reverse()
-    |> String.replace(~r/.{3}(?=.)/, "\\0,")
-    |> String.reverse()
-  end
-
-  defp format_int(_value), do: "n/a"
 
   defp state_badge_class(state) do
     base = "state-badge"
@@ -1170,31 +1687,335 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp count_state(intents, state) do
-    Enum.count(intents, &(&1.state == state))
+  defp thread_row_class(selected, intent) do
+    base = "thread-row"
+    if selected == intent.id, do: "#{base} thread-row-active", else: base
   end
 
-  defp nonqueued_count(intents) do
-    Enum.count(intents, &(&1.state != "queued"))
+  defp phase_chips(nil), do: []
+
+  defp phase_chips(%{chips: chips}) when is_list(chips), do: chips
+
+  defp phase_chips(_phase), do: []
+
+  defp phase_step_class(%{key: key, status: :active}) when key in [:awaiting] do
+    "phase-step phase-step-active phase-step-awaiting-active"
   end
 
-  defp queued_intents(intents) do
+  defp phase_step_class(%{key: key, status: :active}) when key in [:running, :verifying] do
+    "phase-step phase-step-active phase-step-live"
+  end
+
+  defp phase_step_class(%{status: :active}), do: "phase-step phase-step-active"
+  defp phase_step_class(%{status: :done}), do: "phase-step phase-step-done"
+  defp phase_step_class(%{status: :todo}), do: "phase-step"
+
+  defp phase_terminal_class(state) do
+    case state do
+      "done" -> "state-badge state-badge-done"
+      "failed" -> "state-badge state-badge-danger"
+      "cancelled" -> "state-badge state-badge-warning"
+      _ -> "state-badge"
+    end
+  end
+
+  defp deployable_thread?(%{repo: repo, state: state}) do
+    state == "awaiting" and is_binary(repo) and repo != ""
+  end
+
+  defp deployable_thread?(_thread), do: false
+
+  defp timeline_badge_class(event) do
+    "state-badge timeline-badge " <> journal_event_badge_base(journal_field(event, "event"))
+  end
+
+  defp journal_event_badge_base(event) when is_binary(event) do
+    case event do
+      "run_started" -> "state-badge-active"
+      "job_started" -> "state-badge-active"
+      "verification_started" -> "state-badge-warning"
+      "verify_unclear" -> "state-badge-warning"
+      "run_finished" -> "state-badge-done"
+      "issue_terminal" -> "state-badge-done"
+      "job_finished" -> "state-badge-done"
+      "build_succeeded" -> "state-badge-done"
+      "verify_passed" -> "state-badge-done"
+      "verify_failed" -> "state-badge-danger"
+      "delta_emitted" -> "state-badge-warning"
+      "build_submitted" -> "state-badge-warning"
+      _ -> ""
+    end
+  end
+
+  defp journal_event_badge_base(_event), do: ""
+
+  defp journal_event_label(event) when is_binary(event) do
+    case event do
+      "run_started" -> "run started"
+      "run_finished" -> "run finished"
+      "issue_terminal" -> "issue terminal"
+      "delta_emitted" -> "delta emitted"
+      "build_submitted" -> "build submitted"
+      "job_started" -> "job started"
+      "job_finished" -> "job finished"
+      "build_succeeded" -> "build succeeded"
+      "verification_started" -> "verification started"
+      "verify_passed" -> "verify passed"
+      "verify_failed" -> "verify failed"
+      "verify_unclear" -> "verify unclear"
+      other -> other
+    end
+  end
+
+  defp journal_event_label(_event), do: "event"
+
+  defp journal_event_summary(event) when is_map(event) do
+    case journal_field(event, "event") do
+      "run_started" ->
+        run = journal_field(event, "run_index") || "?"
+        worker = journal_field(event, "worker_host") || "n/a"
+        "run #{run} started (worker #{worker})"
+
+      "run_finished" ->
+        run = journal_field(event, "run_index") || "?"
+        status = journal_field(event, "status") || "finished"
+        "run #{run} #{status} (#{journal_duration_ms(event)})"
+
+      "delta_emitted" ->
+        head = head12(journal_field(event, "head")) || "?"
+        image = journal_field(event, "image") || journal_field(event, "repo") || "?"
+        "delta → #{head} #{image}"
+
+      "build_submitted" ->
+        "build submitted #{journal_field(event, "image") || "?"}"
+
+      "job_started" ->
+        "watch job #{journal_field(event, "job_id") || "?"} running"
+
+      "job_finished" ->
+        "watch job #{journal_field(event, "job_id") || "?"} #{journal_field(event, "state") || "finished"}"
+
+      "build_succeeded" ->
+        "image #{journal_field(event, "image") || "?"}:#{journal_field(event, "tag") || "?"} published"
+
+      "verification_started" ->
+        head = head12(journal_field(event, "head"))
+        verify = journal_field(event, "verify_intent")
+
+        "verification started" <>
+          (if verify, do: " (verify #{short_id(verify)}", else: "") <>
+          (if head, do: " · #{head}", else: "") <>
+          (if verify or head, do: ")", else: "")
+
+      "verify_passed" ->
+        verdict_summary(event, "passed")
+
+      "verify_failed" ->
+        verdict_summary(event, "failed")
+
+      "verify_unclear" ->
+        verdict_summary(event, "unclear")
+
+      name when is_binary(name) ->
+        name
+
+      _ ->
+        "event"
+    end
+  end
+
+  defp journal_event_summary(_event), do: "event"
+
+  defp verdict_summary(event, verb) do
+    evidence = journal_field(event, "evidence") || ""
+    verdict = journal_field(event, "verdict") || verb
+
+    "verification #{verb} (#{verdict})" <>
+      if evidence == "", do: "", else: " — #{truncate_text(one_line(evidence), 140)}"
+  end
+
+  defp one_line(text) when is_binary(text) do
+    text
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
+  defp one_line(_other), do: ""
+
+  defp verdict_bar_class(event) do
+    base = "verdict-bar"
+
+    case journal_field(event, "event") do
+      "verify_passed" -> "#{base} verdict-bar-passed"
+      "verify_failed" -> "#{base} verdict-bar-failed"
+      "verify_unclear" -> "#{base} verdict-bar-unclear"
+      _ -> base
+    end
+  end
+
+  defp verdict_head_class(event) do
+    case journal_field(event, "event") do
+      "verify_passed" -> "verdict-label verdict-label-passed"
+      "verify_failed" -> "verdict-label verdict-label-failed"
+      "verify_unclear" -> "verdict-label verdict-label-unclear"
+      _ -> "verdict-label"
+    end
+  end
+
+  defp verdict_head_label(event) do
+    case journal_field(event, "event") do
+      "verify_passed" -> "Verification passed"
+      "verify_failed" -> "Verification failed"
+      "verify_unclear" -> "Verification unclear"
+      _ -> "Verification"
+    end
+  end
+
+  defp verdict_evidence(event) do
+    evidence = journal_field(event, "evidence") || ""
+
+    if evidence == "" do
+      "No evidence was recorded for this verdict."
+    else
+      truncate_text(evidence, 400)
+    end
+  end
+
+  defp journal_duration_ms(event) do
+    case journal_field(event, "duration_ms") do
+      ms when is_integer(ms) -> "#{ms}ms"
+      _ -> "-"
+    end
+  end
+
+  defp head12(head) when is_binary(head), do: String.slice(head, 0, 12)
+  defp head12(_head), do: nil
+
+  defp run_chip_class(expanded_run, run) do
+    base = "state-badge run-chip"
+
+    if expanded_run == run.run_index do
+      "#{base} run-chip-active"
+    else
+      base
+    end
+  end
+
+  defp current_transcript(expanded_transcript, expanded_run, detail) do
+    if expanded_run do
+      expanded_transcript
+    else
+      case detail do
+        %{transcript: transcript} when is_list(transcript) -> transcript
+        _ -> []
+      end
+    end
+  end
+
+  defp journal_timeline(nil), do: []
+
+  defp journal_timeline(%{events: events}) when is_list(events) do
+    events
+    |> Enum.reverse()
+    |> Enum.take(300)
+  end
+
+  defp journal_timeline(_detail), do: []
+
+  defp journal_transcript_panel(transcript, now) when is_list(transcript) do
+    transcript
+    |> Enum.map(&journal_transcript_line(&1, now))
+    |> Enum.join("\n")
+  end
+
+  defp journal_transcript_panel(_transcript, _now), do: ""
+
+  defp journal_transcript_line(entry, now) when is_map(entry) do
+    at = rel_time(journal_field(entry, "at"), now)
+    event = journal_field(entry, "event") || "agent"
+
+    message =
+      entry
+      |> journal_field("message")
+      |> journal_message_text()
+      |> truncate_text(400)
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    if message == "", do: "#{at}  #{event}", else: "#{at}  #{event}: #{message}"
+  end
+
+  defp journal_transcript_line(_entry, _now), do: ""
+
+  defp journal_message_text(message) when is_binary(message), do: message
+  defp journal_message_text(nil), do: ""
+  defp journal_message_text(other), do: inspect(other, pretty: false, limit: :infinity)
+
+  defp journal_field(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      nil -> Map.get(map, to_string(key))
+      value -> value
+    end
+  end
+
+  defp journal_field(_map, _key), do: nil
+
+  # ── Filtering / counting ────────────────────────────────────────────────
+
+  defp thread_count(threads, "all"), do: length(threads)
+
+  defp thread_count(threads, state) do
+    Enum.count(threads, &(&1.state == state))
+  end
+
+  defp verify_count(intents) do
     intents
-    |> Enum.filter(&(&1.state == "queued"))
-    |> Enum.sort_by(&intent_sort_epoch/1, :desc)
+    |> Enum.count(&(verify_intent?(&1) and &1.state in ~w(queued open running awaiting)))
   end
 
-  defp displayed_intents(intents, "all") do
-    intents
-    |> Enum.filter(&(&1.state != "queued"))
-    |> Enum.sort_by(&intent_sort_epoch/1, :desc)
+  defp payload_count(%{counts: counts}, key) when is_map(counts) do
+    Map.get(counts, key, 0)
   end
 
-  defp displayed_intents(intents, state) do
-    intents
-    |> Enum.filter(&(&1.state == state))
-    |> Enum.sort_by(&intent_sort_epoch/1, :desc)
+  defp payload_count(_payload, _key), do: 0
+
+  defp payload_tokens(%{codex_totals: totals}) when is_map(totals) do
+    format_int(Map.get(totals, :total_tokens))
   end
+
+  defp payload_tokens(_payload), do: "n/a"
+
+  defp ops_count(payload) do
+    running = payload_count(payload, :running)
+    blocked = payload_count(payload, :blocked)
+    retrying = payload_count(payload, :retrying)
+
+    if running + blocked + retrying == 0 do
+      nil
+    else
+      to_string(running + blocked + retrying)
+    end
+  end
+
+  defp displayed_threads(threads, "all"), do: threads
+
+  defp displayed_threads(threads, state) do
+    Enum.filter(threads, &(&1.state == state))
+  end
+
+  defp run_count(%{issues: issues}) when is_list(issues) do
+    Enum.reduce(issues, 0, fn issue, acc -> acc + issue.run_count end)
+  end
+
+  defp run_count(_runs), do: 0
+
+  defp event_count(%{issues: issues}) when is_list(issues) do
+    Enum.reduce(issues, 0, fn issue, acc -> acc + issue.event_count end)
+  end
+
+  defp event_count(_runs), do: 0
+
+  # ── Time / formatting ───────────────────────────────────────────────────
 
   defp intent_sort_epoch(intent) do
     case intent_stamp(intent) do
@@ -1241,6 +2062,53 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  defp clock(%DateTime{} = now) do
+    "#{String.pad_leading(to_string(now.hour), 2, "0")}:#{String.pad_leading(to_string(now.minute), 2, "0")}:#{String.pad_leading(to_string(now.second), 2, "0")}"
+  end
+
+  defp clock(_now), do: "--:--:--"
+
+  defp completed_runtime_seconds(payload) do
+    payload.codex_totals.seconds_running || 0
+  end
+
+  defp total_runtime_seconds(payload, now) do
+    completed_runtime_seconds(payload) +
+      Enum.reduce(payload.running, 0, fn entry, total ->
+        total + runtime_seconds_from_started_at(entry.started_at, now)
+      end)
+  end
+
+  defp format_runtime_seconds(seconds) when is_number(seconds) do
+    whole_seconds = max(trunc(seconds), 0)
+    mins = div(whole_seconds, 60)
+    secs = rem(whole_seconds, 60)
+    "#{mins}m #{secs}s"
+  end
+
+  defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
+    DateTime.diff(now, started_at, :second)
+  end
+
+  defp runtime_seconds_from_started_at(started_at, %DateTime{} = now) when is_binary(started_at) do
+    case DateTime.from_iso8601(started_at) do
+      {:ok, parsed, _offset} -> runtime_seconds_from_started_at(parsed, now)
+      _ -> 0
+    end
+  end
+
+  defp runtime_seconds_from_started_at(_started_at, _now), do: 0
+
+  defp format_int(value) when is_integer(value) do
+    value
+    |> Integer.to_string()
+    |> String.reverse()
+    |> String.replace(~r/.{3}(?=.)/, "\\0,")
+    |> String.reverse()
+  end
+
+  defp format_int(_value), do: "n/a"
+
   defp short_repo(nil), do: "n/a"
   defp short_repo(""), do: "n/a"
 
@@ -1269,157 +2137,44 @@ defmodule SymphonyElixirWeb.DashboardLive do
     if filter == state, do: "#{base} filter-chip-active", else: base
   end
 
-  defp section_summary(list, empty_text, _noun, prefix) when is_list(list) do
-    case length(list) do
-      0 -> empty_text
-      count -> "#{prefix} #{count}"
-    end
-  end
-
-  defp section_summary(_other, empty_text, _noun, _prefix), do: empty_text
-
-  defp schedule_runtime_tick do
-    Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
-  end
-
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 
-  # ── Tracked repos (sandman watch pipelines) ──────────────────────────────
+  # ── Components ──────────────────────────────────────────────────────────
 
-  defp load_tracked_repos do
-    try do
-      case SymphonyElixir.TrackedRepos.fetch() do
-        {:ok, repos} when is_list(repos) -> repos
-        _ -> []
-      end
-    rescue
-      _ -> []
-    end
+  attr(:identifier, :string, required: true)
+  attr(:url, :string, default: nil)
+
+  defp issue_identifier(assigns) do
+    assigns = assign(assigns, :href, external_issue_url(assigns.url))
+
+    ~H"""
+    <%= if @href do %>
+      <a
+        class="issue-id issue-id-link"
+        href={@href}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={"Open #{@identifier} in the issue tracker"}
+      ><%= @identifier %></a>
+    <% else %>
+      <span class="issue-id"><%= @identifier %></span>
+    <% end %>
+    """
   end
 
-  # ── Per-job detail panel ─────────────────────────────────────────────────
+  defp external_issue_url(url) when is_binary(url) do
+    url = String.trim(url)
 
-  defp issue_detail_payload(identifier) do
-    try do
-      case Presenter.issue_runs_payload(identifier) do
-        {:ok, detail} when is_map(detail) -> detail
-        _ -> %{error: true}
-      end
-    rescue
-      _ -> %{error: true}
-    end
-  end
-
-  defp maybe_refresh_detail(socket) do
-    case socket.assigns.selected_detail do
-      nil -> socket
-      id -> assign(socket, :detail, issue_detail_payload(id))
-    end
-  end
-
-  defp journal_event_badge_class(event) when is_binary(event) do
-    base = "state-badge"
-
-    case event do
-      "run_started" -> "#{base} state-badge-active"
-      "job_started" -> "#{base} state-badge-active"
-      "run_finished" -> "#{base} state-badge-done"
-      "issue_terminal" -> "#{base} state-badge-done"
-      "job_finished" -> "#{base} state-badge-done"
-      "build_succeeded" -> "#{base} state-badge-done"
-      "delta_emitted" -> "#{base} state-badge-warning"
-      "build_submitted" -> "#{base} state-badge-warning"
-      _ -> base
-    end
-  end
-
-  defp journal_event_badge_class(_event), do: "state-badge"
-
-  defp journal_event_summary(event) when is_map(event) do
-    case journal_field(event, "event") do
-      "run_started" ->
-        run = journal_field(event, "run_index") || "?"
-        worker = journal_field(event, "worker_host") || "n/a"
-        "run #{run} started (worker #{worker})"
-
-      "run_finished" ->
-        run = journal_field(event, "run_index") || "?"
-        status = journal_field(event, "status") || "finished"
-        "run #{run} #{status} (#{journal_duration_ms(event)})"
-
-      "delta_emitted" ->
-        head = head12(journal_field(event, "head")) || "?"
-        image = journal_field(event, "image") || journal_field(event, "repo") || "?"
-        "delta → #{head} #{image}"
-
-      "build_submitted" ->
-        "build submitted #{journal_field(event, "image") || "?"}"
-
-      "job_started" ->
-        "watch job #{journal_field(event, "job_id") || "?"} running"
-
-      "job_finished" ->
-        "watch job #{journal_field(event, "job_id") || "?"} #{journal_field(event, "state") || "finished"}"
-
-      "build_succeeded" ->
-        "image #{journal_field(event, "image") || "?"}:#{journal_field(event, "tag") || "?"} published"
-
-      name when is_binary(name) ->
-        name
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+        url
 
       _ ->
-        "event"
+        nil
     end
   end
 
-  defp journal_event_summary(_event), do: "event"
-
-  defp journal_duration_ms(event) do
-    case journal_field(event, "duration_ms") do
-      ms when is_integer(ms) -> "#{ms}ms"
-      _ -> "-"
-    end
-  end
-
-  defp head12(head) when is_binary(head), do: String.slice(head, 0, 12)
-  defp head12(_head), do: nil
-
-  defp journal_transcript_panel(transcript, now) when is_list(transcript) do
-    transcript
-    |> Enum.map(&journal_transcript_line(&1, now))
-    |> Enum.join("\n")
-  end
-
-  defp journal_transcript_panel(_transcript, _now), do: ""
-
-  defp journal_transcript_line(entry, now) when is_map(entry) do
-    at = rel_time(journal_field(entry, "at"), now)
-    event = journal_field(entry, "event") || "agent"
-
-    message =
-      entry
-      |> journal_field("message")
-      |> journal_message_text()
-      |> truncate_text(400)
-      |> String.replace(~r/\s+/, " ")
-      |> String.trim()
-
-    if message == "", do: "#{at}  #{event}", else: "#{at}  #{event}: #{message}"
-  end
-
-  defp journal_transcript_line(_entry, _now), do: ""
-
-  defp journal_message_text(message) when is_binary(message), do: message
-  defp journal_message_text(nil), do: ""
-  defp journal_message_text(other), do: inspect(other, pretty: false, limit: :infinity)
-
-  defp journal_field(map, key) when is_map(map) do
-    case Map.get(map, key) do
-      nil -> Map.get(map, to_string(key))
-      value -> value
-    end
-  end
-
-  defp journal_field(_map, _key), do: nil
+  defp external_issue_url(_url), do: nil
 end

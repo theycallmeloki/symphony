@@ -492,6 +492,21 @@ textarea.intent-form-input {
   .queue-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .queue-card-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .queue-card-head .issue-stack {
+    flex: 0 0 auto;
+  }
+
+  .queue-card-actions {
+    width: 100%;
+    align-items: center;
+  }
 }
 
 .queue-card {

@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Intents.Intent do
   alias SymphonyElixir.Intents.Intent
 
   @states %{
+    "queued" => :queued,
     "open" => :active,
     "running" => :active,
     "done" => :terminal,
@@ -103,6 +104,16 @@ defmodule SymphonyElixir.Intents.Intent do
   @spec valid_state?(String.t()) :: boolean()
   def valid_state?(state) when is_binary(state) do
     Map.has_key?(@states, state)
+  end
+
+  @spec dispatchable_state?(String.t()) :: boolean()
+  def dispatchable_state?(state) do
+    Map.get(@states, state) == :active
+  end
+
+  @spec queued_state?(String.t()) :: boolean()
+  def queued_state?(state) do
+    Map.get(@states, state) == :queued
   end
 
   @spec terminal_state?(String.t()) :: boolean()

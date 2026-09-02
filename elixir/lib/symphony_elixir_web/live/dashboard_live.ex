@@ -76,6 +76,97 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("queue_repos", %{"repos" => repos}, socket) when is_binary(repos) do
+    lines =
+      repos
+      |> String.split(~r/[\n,]+/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    {queued, errors} =
+      lines
+      |> Enum.map(fn repo_ref -> queue_repo_intent(repo_ref) end)
+      |> Enum.split_with(&match?({:ok, _}, &1))
+
+    message =
+      cond do
+        queued == [] and errors != [] ->
+          "No repos queued — all failed."
+
+        errors == [] ->
+          "Queued #{length(queued)} repo intent#{if(length(queued) == 1, do: "", else: "s")}."
+
+        true ->
+          "Queued #{length(queued)}; #{length(errors)} failed."
+      end
+
+    {:noreply, assign(socket, :intents_error, message)}
+  end
+
+  def handle_event("queue_repos", _params, socket) do
+    {:noreply, assign(socket, :intents_error, "Paste repo URLs or owner/name lines to queue.")}
+  end
+
+  @impl true
+  def handle_event(
+        "queued_task",
+        %{"intent_id" => id, "description" => description, "action" => action},
+        socket
+      )
+      when is_binary(id) do
+    trimmed = String.trim(description || "")
+
+    cond do
+      action == "run" and trimmed == "" ->
+        {:noreply, assign(socket, :intents_error, "Assign a task description before running.")}
+
+      action == "run" ->
+        case SymphonyElixir.Intents.IntentStore.assign_and_activate_intent(id, %{description: trimmed}) do
+          {:ok, _intent} -> {:noreply, assign(socket, :intents_error, "Intent #{id} activated — dispatched.")}
+          {:error, :invalid_state} -> {:noreply, assign(socket, :intents_error, "Intent #{id} is not queued.")}
+          {:error, reason} -> {:noreply, assign(socket, :intents_error, "Could not run intent #{id}: #{inspect(reason)}")}
+        end
+
+      action == "save" ->
+        case SymphonyElixir.Intents.IntentStore.assign_intent(id, %{description: trimmed}) do
+          {:ok, _intent} -> {:noreply, assign(socket, :intents_error, "Task saved for #{id}.")}
+          {:error, :invalid_state} -> {:noreply, assign(socket, :intents_error, "Intent #{id} is not queued.")}
+          {:error, reason} -> {:noreply, assign(socket, :intents_error, "Could not save task for #{id}: #{inspect(reason)}")}
+        end
+
+      true ->
+        {:noreply, assign(socket, :intents_error, "Unknown action.")}
+    end
+  end
+
+  def handle_event("queued_task", _params, socket) do
+    {:noreply, assign(socket, :intents_error, "Missing intent id.")}
+  end
+
+  defp queue_repo_intent(repo_ref) do
+    slug = repo_slug(repo_ref)
+
+    SymphonyElixir.Intents.IntentStore.create_intent(%{
+      "state" => "queued",
+      "title" => "Repo job: #{slug}",
+      "repo" => repo_ref,
+      "labels" => ["repo-queue"],
+      "description" =>
+        "Queued repository job for #{slug}. Assign a concrete task before activating: what should the agent build, change, verify, or report about this repository?"
+    })
+  end
+
+  defp repo_slug(repo_ref) do
+    repo_ref
+    |> String.trim()
+    |> String.trim_trailing(".git")
+    |> String.split(["/", ":"], trim: true)
+    |> List.last()
+    |> Kernel.||("repo")
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
@@ -369,9 +460,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div>
             <h2 class="section-title">Intents</h2>
             <p class="section-copy">
-              Dashboard-registered job intents. Open intents are picked up by the
-              orchestrator and run as agent jobs; each run is journaled under the
-              intent id.
+              Job queue and runs. Queued intents wait for a task; assign a
+              task and run to dispatch them. Open intents are picked up by the
+              orchestrator and run as agent jobs; each run is journaled under
+              the intent id.
             </p>
           </div>
         </div>
@@ -403,73 +495,127 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </label>
         </form>
 
+        <form class="intent-form intent-form-queue" phx-submit="queue_repos">
+          <label class="intent-form-field">
+            <span>Queue repositories (one URL or owner/name per line — comma/newline separated)</span>
+            <textarea
+              class="intent-form-input"
+              name="repos"
+              rows="2"
+              placeholder={"e.g.\ngit@github.com:theycallmeloki/sandman.git\nhttps://github.com/theycallmeloki/symphony.git"}
+            ></textarea>
+          </label>
+          <div>
+            <button class="primary-button" type="submit">Queue repos as intents</button>
+          </div>
+        </form>
+
         <%= if @intents_error do %>
           <p class="form-error"><%= @intents_error %></p>
         <% end %>
 
-        <%= if @intents == [] do %>
-          <p class="empty-state">No intents registered yet.</p>
-        <% else %>
-          <div class="table-wrap">
-            <table class="data-table data-table-intents">
-              <thead>
-                <tr>
-                  <th>Intent</th>
-                  <th>State</th>
-                  <th>Repo</th>
-                  <th>Labels</th>
-                  <th>Outcome</th>
-                  <th>Updated</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr :for={intent <- @intents}>
-                  <td>
+        <div class="queue-block">
+          <h3 class="queue-title">Queued — waiting for a task</h3>
+
+          <%= if Enum.all?(@intents, &(&1.state != "queued")) do %>
+            <p class="empty-state">Nothing queued. Paste repo references above or queue them from the repo scanner.</p>
+          <% else %>
+            <div class="queue-list">
+              <%= for intent <- Enum.filter(@intents, &(&1.state == "queued")) do %>
+                <div class="queue-card">
+                  <div class="queue-card-head">
                     <div class="issue-stack">
                       <span class="issue-id"><%= intent.id %></span>
-                      <span class="intent-title" title={intent.description || intent.title}><%= intent.title %></span>
-                      <a class="issue-link" href={"/api/v1/intents/#{intent.id}"}>JSON details</a>
+                      <span class="intent-title"><%= intent.title %></span>
+                      <span class="muted queue-repo"><%= intent.repo || "n/a" %></span>
                     </div>
-                  </td>
-                  <td>
-                    <span class={intent_state_badge_class(intent.state)}>
-                      <%= intent.state %>
-                    </span>
-                  </td>
-                  <td><%= intent.repo || "n/a" %></td>
-                  <td>
-                    <span class="muted">
-                      <%= if intent.labels == [] do %>
-                        —
-                      <% else %>
-                        <%= Enum.join(intent.labels, ", ") %>
-                      <% end %>
-                    </span>
-                  </td>
-                  <td>
-                    <div class="detail-stack">
-                      <span class="event-text" title={intent_result_summary(intent)}>
-                        <%= intent_result_summary(intent) %>
-                      </span>
-                    </div>
-                  </td>
-                  <td class="mono"><%= intent.updated_at || "n/a" %></td>
-                  <td>
-                    <%= if intent.state in ["open", "running"] do %>
+                    <div class="queue-card-actions">
+                      <form class="queue-task-form" phx-submit="queued_task">
+                        <input type="hidden" name="intent_id" value={intent.id} />
+                        <textarea
+                          class="intent-form-input queue-task-input"
+                          name="description"
+                          rows="1"
+                          placeholder="Assign the task this repo job should perform…"
+                        ><%= intent.description %></textarea>
+                        <button class="subtle-button" type="submit" name="action" value="save">Save task</button>
+                        <button class="primary-button" type="submit" name="action" value="run">Assign &amp; run</button>
+                      </form>
                       <button
                         type="button"
                         class="subtle-button"
                         phx-click="cancel_intent"
                         phx-value-id={intent.id}
-                      >Cancel</button>
+                      >Remove</button>
+                    </div>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="table-wrap intent-history">
+          <table class="data-table data-table-intents">
+            <thead>
+              <tr>
+                <th>Intent</th>
+                <th>State</th>
+                <th>Repo</th>
+                <th>Labels</th>
+                <th>Outcome</th>
+                <th>Updated</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for intent <- Enum.filter(@intents, &(&1.state != "queued")) do %>
+              <tr>
+                <td>
+                  <div class="issue-stack">
+                    <span class="issue-id"><%= intent.id %></span>
+                    <span class="intent-title" title={intent.description || intent.title}><%= intent.title %></span>
+                    <a class="issue-link" href={"/api/v1/intents/#{intent.id}"}>JSON details</a>
+                  </div>
+                </td>
+                <td>
+                  <span class={intent_state_badge_class(intent.state)}>
+                    <%= intent.state %>
+                  </span>
+                </td>
+                <td><%= intent.repo || "n/a" %></td>
+                <td>
+                  <span class="muted">
+                    <%= if intent.labels == [] do %>
+                      —
+                    <% else %>
+                      <%= Enum.join(intent.labels, ", ") %>
                     <% end %>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        <% end %>
+                  </span>
+                </td>
+                <td>
+                  <div class="detail-stack">
+                    <span class="event-text" title={intent_result_summary(intent)}>
+                      <%= intent_result_summary(intent) %>
+                    </span>
+                  </div>
+                </td>
+                <td class="mono"><%= intent.updated_at || "n/a" %></td>
+                <td>
+                  <%= if intent.state in ["open", "running"] do %>
+                    <button
+                      type="button"
+                      class="subtle-button"
+                      phx-click="cancel_intent"
+                      phx-value-id={intent.id}
+                    >Cancel</button>
+                  <% end %>
+                </td>
+              </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="section-card">
@@ -559,6 +705,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     cond do
       normalized in ["running", "open"] -> "#{base} state-badge-active"
+      normalized in ["queued"] -> "#{base} state-badge-warning"
       normalized in ["done", "completed"] -> "#{base} state-badge-done"
       normalized in ["failed", "blocked", "cancelled"] -> "#{base} state-badge-danger"
       true -> base

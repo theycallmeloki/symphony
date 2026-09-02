@@ -77,6 +77,66 @@ defmodule SymphonyElixirWeb.IntentsApiController do
     end
   end
 
+  @spec activate(Conn.t(), map()) :: Conn.t()
+  def activate(conn, %{"intent_id" => intent_id}) do
+    case IntentStore.activate_intent(intent_id) do
+      {:ok, intent} ->
+        json(conn, %{intent: Intent.to_api_map(intent)})
+
+      {:error, :not_found} ->
+        error_response(conn, 404, :not_found, "Intent not found")
+
+      {:error, :invalid_state} ->
+        error_response(conn, 409, :invalid_state, "Only queued intents can be activated")
+
+      {:error, reason} ->
+        error_response(conn, 503, :store_unavailable, "Intent store unavailable: #{inspect(reason)}")
+    end
+  end
+
+  @spec assign(Conn.t(), map()) :: Conn.t()
+  def assign(conn, %{"intent_id" => intent_id} = params) do
+    intent_params = params["intent"] || %{}
+    changes = job_spec_changes(intent_params)
+
+    cond do
+      params["activate"] == true or params["activate"] == "true" ->
+        handle_assign(conn, intent_id, :assign_and_activate_intent, changes)
+
+      true ->
+        handle_assign(conn, intent_id, :assign_intent, changes)
+    end
+  end
+
+  defp handle_assign(conn, intent_id, fun, changes) do
+    case apply(IntentStore, fun, [intent_id, changes]) do
+      {:ok, intent} ->
+        json(conn, %{intent: Intent.to_api_map(intent)})
+
+      {:error, :not_found} ->
+        error_response(conn, 404, :not_found, "Intent not found")
+
+      {:error, :invalid_state} ->
+        error_response(conn, 409, :invalid_state, "Only queued intents can be assigned")
+
+      {:error, reason} ->
+        error_response(conn, 503, :store_unavailable, "Intent store unavailable: #{inspect(reason)}")
+    end
+  end
+
+  defp job_spec_changes(params) do
+    Map.new(params, fn {key, value} -> {to_atom(key), value} end)
+    |> then(fn changes ->
+      changes
+      |> Map.take([:description, :title, :repo])
+      |> Enum.filter(fn {_key, value} -> is_binary(value) and String.trim(value) != "" end)
+      |> Map.new()
+    end)
+  end
+
+  defp to_atom(key) when is_atom(key), do: key
+  defp to_atom(key) when is_binary(key), do: String.to_atom(key)
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, :method_not_allowed, "Method not allowed")

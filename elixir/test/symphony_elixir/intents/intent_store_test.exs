@@ -102,6 +102,59 @@ defmodule SymphonyElixir.Intents.IntentStoreTest do
     end
   end
 
+  describe "queued intents + activate/assign" do
+    test "creates intents in the queued state" do
+      {:ok, intent} =
+        IntentStore.create_intent(%{
+          "title" => "Repo job: sandman",
+          "repo" => "git@github.com:theycallmeloki/sandman.git",
+          "state" => "queued",
+          "labels" => ["repo-queue"]
+        })
+
+      assert intent.state == "queued"
+      assert {:ok, [%Intent{id: id}]} = IntentStore.list_intents_by_state(["queued"])
+      assert id == intent.id
+    end
+
+    test "activate moves queued to open" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+
+      assert {:ok, %Intent{state: "open"}} = IntentStore.activate_intent(intent.id)
+      assert {:ok, %Intent{state: "open"}} = IntentStore.get_intent(intent.id)
+    end
+
+    test "activate rejects non-queued intents" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+      assert {:error, :invalid_state} = IntentStore.activate_intent(intent.id)
+      assert {:ok, %Intent{state: "open"}} = IntentStore.get_intent(intent.id)
+    end
+
+    test "park moves open back to queued" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+      assert {:ok, %Intent{state: "queued"}} = IntentStore.park_intent(intent.id)
+    end
+
+    test "assign updates the description while staying queued" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+
+      assert {:ok, %Intent{state: "queued", description: "audit the README"}} =
+               IntentStore.assign_intent(intent.id, %{description: "audit the README"})
+    end
+
+    test "assign_and_activate sets the task and dispatches" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+
+      assert {:ok, %Intent{state: "open", description: "run the tests"}} =
+               IntentStore.assign_and_activate_intent(intent.id, %{description: "run the tests"})
+    end
+
+    test "queued intents can still be cancelled" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+      assert {:ok, %Intent{state: "cancelled"}} = IntentStore.cancel_intent(intent.id)
+    end
+  end
+
   defp terminal(id, state) do
     {:ok, _} = IntentStore.set_terminal_state(id, state, %{"status" => state})
     :ok

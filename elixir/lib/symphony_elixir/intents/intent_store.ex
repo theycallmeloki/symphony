@@ -156,6 +156,67 @@ defmodule SymphonyElixir.Intents.IntentStore do
     end
   end
 
+  @doc """
+  Activates a queued intent: `queued` -> `open`, making it dispatchable.
+  """
+  @spec activate_intent(String.t()) :: {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def activate_intent(id) when is_binary(id) do
+    transition_intent(id, "open", ["queued"], %{})
+  end
+
+  @doc """
+  Parks an intent back into the queue: `open` -> `queued` (no-op if the
+  orchestrator already claimed it; the run completes and lands terminal).
+  """
+  @spec park_intent(String.t()) :: {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def park_intent(id) when is_binary(id) do
+    transition_intent(id, "queued", ["open"], %{})
+  end
+
+  @doc """
+  Assigns a job spec (description) to a queued intent, keeping it queued.
+  """
+  @spec assign_intent(String.t(), map()) ::
+          {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def assign_intent(id, changes) when is_binary(id) and is_map(changes) do
+    transition_intent(id, nil, ["queued"], changes)
+  end
+
+  @doc """
+  Assigns a job spec and activates in one step: `queued` -> `open`.
+  """
+  @spec assign_and_activate_intent(String.t(), map()) ::
+          {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def assign_and_activate_intent(id, changes) when is_binary(id) and is_map(changes) do
+    transition_intent(id, "open", ["queued"], changes)
+  end
+
+  defp transition_intent(id, to_state, from_states, changes) when is_binary(id) do
+    with {:ok, %Intent{} = current} <- get_intent(id),
+         true <- current.state in from_states do
+      next_state = to_state || current.state
+
+      updated =
+        current
+        |> Map.merge(changes)
+        |> Map.put(:state, next_state)
+        |> Map.put(:updated_at, DateTime.utc_now() |> DateTime.to_iso8601())
+
+      case write_intent(updated) do
+        :ok ->
+          broadcast()
+          {:ok, updated}
+
+        {:error, reason} = error ->
+          Logger.error("IntentStore transition failed id=#{id} to=#{next_state} reason=#{inspect(reason)}")
+          error
+      end
+    else
+      {:error, :not_found} = error -> error
+      false -> {:error, :invalid_state}
+    end
+  end
+
   @doc false
   @spec redka_available?() :: boolean()
   def redka_available? do

@@ -471,6 +471,71 @@ textarea.intent-form-input {
   vertical-align: top;
 }
 
+.intent-form-queue {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.queue-block {
+  margin-top: 1.25rem;
+}
+
+.queue-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.queue-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card-muted);
+  padding: 0.8rem 0.9rem;
+}
+
+.queue-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.queue-card-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex: 0 1 auto;
+}
+
+.queue-task-form {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  flex: 1 1 auto;
+}
+
+.queue-task-input {
+  flex: 1 1 22rem;
+  resize: vertical;
+}
+
+.queue-repo {
+  font-size: 0.85rem;
+}
+
+.intent-history {
+  margin-top: 1.25rem;
+}
+
 .issue-id {
   font-weight: 600;
   letter-spacing: -0.01em;

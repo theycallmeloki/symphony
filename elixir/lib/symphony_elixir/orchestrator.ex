@@ -434,7 +434,11 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        # A cancelled thread keeps its parked workspace: cancellation stops
+        # the run, but the work it produced is the operator's recovery
+        # candidate (deploy the parked edits). done/failed threads have no
+        # parked work to recover and clean up as before.
+        terminate_running_issue(state, issue.id, !preserve_workspace_on_terminal?(issue.state))
 
       !issue_routable?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -468,7 +472,15 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
+
+        state =
+          if preserve_workspace_on_terminal?(issue.state) do
+            state
+          else
+            cleanup_issue_workspace(issue, Map.get(state.blocked, issue.id, %{}))
+            state
+          end
+
         release_issue_claim(state, issue.id)
 
       !issue_routable?(issue) ->
@@ -632,17 +644,48 @@ defmodule SymphonyElixir.Orchestrator do
         |> record_session_completion_totals(running_entry)
         |> stop_and_block_issue(issue_id, running_entry, error)
       else
-        Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+        cap = Config.settings!().codex.stall_restart_cap
+        attempt = Map.get(running_entry, :retry_attempt) || 0
 
-        next_attempt = next_retry_attempt_from_running(running_entry)
+        # Parking only works on a tracker whose notify_run_finished parks
+        # the issue (redka -> awaiting); read-only trackers keep the
+        # legacy restart-with-backoff path so the cap never strands them.
+        if cap > 0 and attempt >= cap and Config.settings!().tracker.kind == "redka" do
+          # Restarting again would only churn the agent slot: the run has
+          # stalled past the cap, so park the thread `awaiting` WITH its
+          # workspace (the work it produced is the operator's recovery
+          # candidate — deploy, next prompt, or cancel) instead of looping
+          # forever on a run that can no longer signal completion.
+          Logger.warning(
+            "Issue stalled past restart cap: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} restarts=#{attempt}; parking thread for the operator"
+          )
 
-        state
-        |> terminate_running_issue(issue_id, false)
-        |> schedule_issue_retry(issue_id, next_attempt, %{
-          identifier: identifier,
-          issue_url: running_entry.issue.url,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
-        })
+          detail =
+            "stalled for #{elapsed_ms}ms after #{attempt} restart(s); run parked with its workspace for operator review"
+
+          # terminate_running_issue below records the session totals
+          journal_run_finished(running_entry, issue_id, "completed", %{"error" => detail})
+
+          # The redka adapter parks the thread (open -> awaiting); the
+          # workspace is retained by terminate_running_issue below.
+          Tracker.notify_run_finished(issue_id, "completed", %{"error" => detail})
+
+          state
+          |> terminate_running_issue(issue_id, false)
+          |> release_issue_claim(issue_id)
+        else
+          Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+
+          next_attempt = next_retry_attempt_from_running(running_entry)
+
+          state
+          |> terminate_running_issue(issue_id, false)
+          |> schedule_issue_retry(issue_id, next_attempt, %{
+            identifier: identifier,
+            issue_url: running_entry.issue.url,
+            error: "stalled for #{elapsed_ms}ms without codex activity"
+          })
+        end
       end
     else
       state
@@ -1139,7 +1182,16 @@ defmodule SymphonyElixir.Orchestrator do
 
         journal_issue_terminal(issue_id, issue)
 
-        cleanup_issue_workspace(issue, metadata)
+        state =
+          if preserve_workspace_on_terminal?(issue.state) do
+            # cancelled: the workspace holds the run's work for operator
+            # recovery — do not sweep it with the terminal cleanup
+            state
+          else
+            cleanup_issue_workspace(issue, metadata)
+            state
+          end
+
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -1185,7 +1237,13 @@ defmodule SymphonyElixir.Orchestrator do
         issues
         |> Enum.each(fn
           %Issue{} = issue ->
-            cleanup_issue_workspace(issue)
+            if preserve_workspace_on_terminal?(issue.state) do
+              # cancelled threads keep their workspace for operator
+              # recovery; every other terminal state is swept
+              :ok
+            else
+              cleanup_issue_workspace(issue)
+            end
 
           _ ->
             :ok
@@ -1266,6 +1324,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
+
+  # A cancelled thread is a parked-work recovery candidate: its workspace
+  # holds the edits the run produced before it was stopped, and the deploy
+  # action can emit them. Only cancellation preserves — done/failed are
+  # terminal with no work to recover.
+  defp preserve_workspace_on_terminal?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "cancelled"
+  end
+
+  defp preserve_workspace_on_terminal?(_state_name), do: false
 
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do

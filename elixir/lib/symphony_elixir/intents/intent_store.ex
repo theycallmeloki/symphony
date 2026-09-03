@@ -179,6 +179,19 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   @doc """
+  Recovers a cancelled thread whose parked workspace the operator deployed:
+  `cancelled` -> `awaiting`, so the thread continues its lifecycle (close
+  to done, or a next prompt). Deliberately a separate transition — a run's
+  own completion must never resurrect a cancel (notify_run_finished keeps
+  terminal intents untouched); only this explicit operator recovery does.
+  """
+  @spec recover_cancelled_intent(String.t(), map() | nil) ::
+          {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
+  def recover_cancelled_intent(id, result \\ nil) when is_binary(id) do
+    transition_intent(id, "awaiting", ["cancelled"], %{result: result})
+  end
+
+  @doc """
   Closes an awaiting thread: `awaiting` -> `done` (terminal). The parked
   agent session is stopped by the registry hook.
   """

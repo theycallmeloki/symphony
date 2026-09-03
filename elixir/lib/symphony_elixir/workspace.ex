@@ -257,6 +257,22 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @doc """
+  The workspace directory path an issue maps to, WITHOUT creating it. The
+  path derivation is public so a caller that only knows the issue can
+  locate a workspace that already exists on disk even after the session
+  registry released it (a cancelled thread whose run was stopped keeps its
+  workspace for operator recovery — deploy needs the path back).
+  """
+  @spec path_for(map() | String.t() | nil, worker_host()) :: Path.t()
+  def path_for(issue_or_identifier, worker_host \\ nil) do
+    workspace_path_for_issue(workspace_key(issue_or_identifier), worker_host)
+    |> case do
+      {:ok, path} -> path
+      path when is_binary(path) -> path
+    end
+  end
+
+  @doc """
   Returns the collision-safe directory name for an issue identifier.
 
   The hash is derived from the original identifier so callers that only know the identifier can

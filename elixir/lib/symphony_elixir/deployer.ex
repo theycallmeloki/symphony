@@ -22,7 +22,8 @@ defmodule SymphonyElixir.Deployer do
     Config,
     RepoDelta,
     RunJournal,
-    Tracker.Issue
+    Tracker.Issue,
+    Workspace
   }
   alias SymphonyElixir.Intents.{Intent, IntentStore}
 
@@ -39,7 +40,7 @@ defmodule SymphonyElixir.Deployer do
   """
   @spec deploy(String.t()) :: deploy_result()
   def deploy(intent_id) when is_binary(intent_id) do
-    with {:ok, %Intent{state: "awaiting"} = intent} <- fetch_awaiting(intent_id),
+    with {:ok, %Intent{} = intent} <- fetch_deployable(intent_id),
          {:ok, workspace} <- parked_workspace(intent),
          {:ok, issue} <- to_issue(intent) do
       do_deploy(issue, intent, workspace)
@@ -48,10 +49,14 @@ defmodule SymphonyElixir.Deployer do
 
   @doc """
   The state an intent must be in for a deploy. Exposed for the API layer.
+  An `awaiting` thread deploys its parked run; a `cancelled` thread whose
+  workspace survived cancellation deploys too — the recovery path for a
+  run that was stopped (stalled past the restart cap, operator-cancelled)
+  but whose work is complete and parked.
   """
   @spec deployable?(Intent.t()) :: boolean()
   def deployable?(%Intent{state: state, repo: repo}) do
-    state == "awaiting" and is_binary(repo) and repo != ""
+    state in ["awaiting", "cancelled"] and is_binary(repo) and repo != ""
   end
 
   @doc """
@@ -77,10 +82,10 @@ defmodule SymphonyElixir.Deployer do
     end
   end
 
-  defp fetch_awaiting(intent_id) do
+  defp fetch_deployable(intent_id) do
     case fetch_intent(intent_id) do
       {:ok, %Intent{} = intent} ->
-        if intent.state == "awaiting" do
+        if intent.state in ["awaiting", "cancelled"] do
           {:ok, intent}
         else
           {:error, {:invalid_state, intent.state}}
@@ -92,16 +97,26 @@ defmodule SymphonyElixir.Deployer do
   end
 
   defp parked_workspace(%Intent{} = intent) do
+    # The session registry records the workspace while the run's park is
+    # alive; a cancelled thread's park was stopped on cancellation, so the
+    # path falls back to the deterministic per-issue derivation (the
+    # directory itself is retained by the cancellation cleanup policy).
     case SessionRegistry.workspace(intent.id) do
-      workspace when is_binary(workspace) ->
+      workspace when is_binary(workspace) and workspace != "" ->
         if File.dir?(workspace) do
           {:ok, workspace}
         else
           {:error, :workspace_missing}
         end
 
-      nil ->
-        {:error, :no_parked_workspace}
+      _ ->
+        derived = Workspace.path_for(intent.id)
+
+        if File.dir?(derived) do
+          {:ok, derived}
+        else
+          {:error, :no_parked_workspace}
+        end
     end
   end
 
@@ -129,6 +144,7 @@ defmodule SymphonyElixir.Deployer do
         case submit_build(issue, intent) do
           {:ok, head} ->
             Logger.info("Deploy delivered issue=#{issue.id} head=#{head}")
+            repark_recovered_thread(intent)
             {:ok, %{head: head, state: :deployed}}
 
           {:error, reason} ->
@@ -148,6 +164,26 @@ defmodule SymphonyElixir.Deployer do
       Logger.error("Deploy crashed issue=#{issue.id} error=#{Exception.message(error)}")
       {:error, {:deploy_crashed, Exception.message(error)}}
   end
+
+  # A deploy from a cancelled thread recovers it: the emitted workspace is
+  # now a submitted build, so the thread re-parks `awaiting` and continues
+  # its lifecycle (close to done when the build lands). Best effort — the
+  # deploy itself already succeeded.
+  defp repark_recovered_thread(%Intent{state: "cancelled"} = intent) do
+    case IntentStore.recover_cancelled_intent(intent.id) do
+      {:ok, _} ->
+        Logger.info("Deploy re-parked recovered thread issue=#{intent.id}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "Deploy could not re-park recovered thread issue=#{intent.id} reason=#{inspect(reason)}"
+        )
+    end
+
+    :ok
+  end
+
+  defp repark_recovered_thread(_intent), do: :ok
 
   # Journal the submitted build and hand it to BuildFusion for pipeline
   # tracking. Returns {:ok, mirror_head} once journaled.

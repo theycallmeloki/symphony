@@ -100,6 +100,23 @@ defmodule SymphonyElixir.Intents.IntentStoreTest do
     test "unknown id returns not_found" do
       assert {:error, :not_found} = IntentStore.cancel_intent("int-missing")
     end
+
+    test "a cancelled thread recovers to awaiting only via the explicit recovery transition" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+      assert {:ok, %Intent{state: "cancelled"}} = IntentStore.cancel_intent(intent.id)
+
+      # a run's own completion must NOT resurrect a cancel (notify_run_finished
+      # keeps terminal intents untouched)
+      assert {:error, :invalid_state} = IntentStore.complete_to_awaiting(intent.id)
+
+      # the operator's explicit recovery (deploy of the parked workspace)
+      # re-parks the thread so it continues its lifecycle
+      assert {:ok, %Intent{state: "awaiting"}} =
+               IntentStore.recover_cancelled_intent(intent.id, %{"status" => "recovered"})
+
+      # and an awaiting thread can still be closed
+      assert {:ok, %Intent{state: "done"}} = IntentStore.close_intent(intent.id)
+    end
   end
 
   describe "queued intents + activate/assign" do

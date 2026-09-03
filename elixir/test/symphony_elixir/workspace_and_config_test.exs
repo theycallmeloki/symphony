@@ -5,6 +5,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
+  test "path_for derives the same directory create_for_issue uses, without creating it" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-path-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      # create_for_issue materializes the directory
+      assert {:ok, created} = Workspace.create_for_issue("int-abc123")
+      assert File.dir?(created)
+
+      # path_for recovers the SAME path from the bare id even after the
+      # registry/session state is gone (a cancelled thread's workspace is
+      # retained on disk for the recovery deploy)
+      assert Workspace.path_for("int-abc123") == created
+
+      # an unrelated id derives a path that does not exist yet
+      other = Workspace.path_for("int-other")
+      assert other != created
+      refute File.dir?(other)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(

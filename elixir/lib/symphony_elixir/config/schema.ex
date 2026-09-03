@@ -222,6 +222,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      # Stall restarts per run before the run parks instead of retrying
+      # forever: a run whose stalls exceed the cap lands `awaiting` (work
+      # preserved) for the operator instead of churning the agent slot in
+      # an unbounded restart loop. 0 disables the cap (legacy behavior).
+      field(:stall_restart_cap, :integer, default: 2)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -236,7 +241,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :turn_timeout_ms,
           :read_timeout_ms,
-          :stall_timeout_ms
+          :stall_timeout_ms,
+          :stall_restart_cap
         ],
         empty_values: []
       )
@@ -251,6 +257,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:stall_restart_cap, greater_than_or_equal_to: 0)
     end
   end
 

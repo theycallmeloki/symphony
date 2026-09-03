@@ -274,8 +274,23 @@ defmodule SymphonyElixir.AgentRuntime.PiAcp do
           %{session | buffer: [session.buffer, text]}
         end
 
-      %{"sessionUpdate" => su} when su in ["tool_call", "tool_call_update", "agent_message"] ->
-        flush_text(session, on_message)
+      %{"sessionUpdate" => "tool_call"} ->
+        # A tool is starting: the pi is working but will stream nothing
+        # until the tool finishes (or its next message) — surface the
+        # activity so the orchestrator's stall watchdog sees liveness
+        # through the tool phase instead of killing a working run. The
+        # text buffer is flushed first so the transcript stays ordered.
+        updated = flush_text(session, on_message)
+        emit(updated, on_message, :tool_call, %{session_id: updated.session_id})
+        updated
+
+      %{"sessionUpdate" => "agent_message"} ->
+        # The pi's commentary after a tool result: same liveness role.
+        # tool_call_update streams argument fragments per token and is
+        # deliberately ignored — it would flood the journal.
+        updated = flush_text(session, on_message)
+        emit(updated, on_message, :agent_message, %{session_id: updated.session_id})
+        updated
 
       _ ->
         session

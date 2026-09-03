@@ -22,7 +22,6 @@ defmodule SymphonyElixir.Deployer do
     Config,
     RepoDelta,
     RunJournal,
-    Tracker.Issue,
     Workspace
   }
   alias SymphonyElixir.Intents.{Intent, IntentStore}
@@ -41,9 +40,8 @@ defmodule SymphonyElixir.Deployer do
   @spec deploy(String.t()) :: deploy_result()
   def deploy(intent_id) when is_binary(intent_id) do
     with {:ok, %Intent{} = intent} <- fetch_deployable(intent_id),
-         {:ok, workspace} <- parked_workspace(intent),
-         {:ok, issue} <- to_issue(intent) do
-      do_deploy(issue, intent, workspace)
+         {:ok, workspace} <- parked_workspace(intent) do
+      do_deploy(intent, workspace)
     end
   end
 
@@ -120,30 +118,12 @@ defmodule SymphonyElixir.Deployer do
     end
   end
 
-  # Mirror the redka adapter's intent -> issue shape for the emit path.
-  defp to_issue(%Intent{} = intent) do
-    {:ok,
-     %Issue{
-       id: intent.id,
-       identifier: intent.id,
-       title: intent.title,
-       description: intent.description,
-       state: intent.state,
-       labels: intent.labels || [],
-       url: nil,
-       repo: intent.repo,
-       dispatchable: true,
-       created_at: nil,
-       updated_at: nil
-     }}
-  end
-
-  defp do_deploy(issue, intent, workspace) do
-    case RepoDelta.emit_delta(workspace, issue, nil) do
+  defp do_deploy(%Intent{} = intent, workspace) do
+    case RepoDelta.emit_delta(workspace) do
       {:ok, :delivered} ->
-        case submit_build(issue, intent) do
+        case submit_build(intent) do
           {:ok, head} ->
-            Logger.info("Deploy delivered issue=#{issue.id} head=#{head}")
+            Logger.info("Deploy delivered issue=#{intent.id} head=#{head}")
             repark_recovered_thread(intent)
             {:ok, %{head: head, state: :deployed}}
 
@@ -152,16 +132,16 @@ defmodule SymphonyElixir.Deployer do
         end
 
       {:ok, :no_changes} ->
-        Logger.info("Deploy requested but workspace has no changes issue=#{issue.id}")
+        Logger.info("Deploy requested but workspace has no changes issue=#{intent.id}")
         {:ok, :no_changes}
 
       {:error, reason} ->
-        Logger.warning("Deploy emit failed issue=#{issue.id} reason=#{inspect(reason)}")
+        Logger.warning("Deploy emit failed issue=#{intent.id} reason=#{inspect(reason)}")
         {:error, reason}
     end
   rescue
     error ->
-      Logger.error("Deploy crashed issue=#{issue.id} error=#{Exception.message(error)}")
+      Logger.error("Deploy crashed issue=#{intent.id} error=#{Exception.message(error)}")
       {:error, {:deploy_crashed, Exception.message(error)}}
   end
 
@@ -187,41 +167,41 @@ defmodule SymphonyElixir.Deployer do
 
   # Journal the submitted build and hand it to BuildFusion for pipeline
   # tracking. Returns {:ok, mirror_head} once journaled.
-  defp submit_build(issue, intent) do
+  defp submit_build(%Intent{} = intent) do
     base = RepoDelta.sandman_base()
 
     with {:ok, head} when is_binary(head) <-
-           RepoDelta.mirror_head(base, issue.repo, RepoDelta.tracked_branch()),
+           RepoDelta.mirror_head(base, intent.repo, RepoDelta.tracked_branch()),
          branch <- RepoDelta.tracked_branch(),
-         image <- RepoDelta.repo_name(issue.repo),
+         image <- RepoDelta.repo_name(intent.repo),
          registry <- build_events_registry() do
       payload = %{
-        "issue_id" => issue.id,
-        "repo" => issue.repo,
+        "issue_id" => intent.id,
+        "repo" => intent.repo,
         "branch" => branch,
         "head" => head,
         "image" => image,
         "registry" => registry
       }
 
-      journal_event(issue, "delta_emitted", payload)
-      journal_event(issue, "build_submitted", payload)
+      journal_event(intent, "delta_emitted", payload)
+      journal_event(intent, "build_submitted", payload)
 
-      if is_binary(issue.identifier) do
-        BuildFusion.track(issue.identifier, issue.repo, branch, image, registry, head, intent.description)
+      if is_binary(intent.id) do
+        BuildFusion.track(intent.id, intent.repo, branch, image, registry, head, intent.description)
       end
 
       {:ok, head}
     else
       {:error, reason} ->
-        Logger.warning("Deploy head fetch failed issue=#{issue.id} reason=#{inspect(reason)}")
+        Logger.warning("Deploy head fetch failed issue=#{intent.id} reason=#{inspect(reason)}")
         {:error, reason}
     end
   end
 
-  defp journal_event(issue, event, payload) do
-    if RunJournal.enabled?() and is_binary(issue.identifier) and is_binary(issue.repo) do
-      RunJournal.record(RunJournal.root(), issue.identifier, event, payload)
+  defp journal_event(%Intent{} = intent, event, payload) do
+    if RunJournal.enabled?() and is_binary(intent.id) and is_binary(intent.repo) do
+      RunJournal.record(RunJournal.root(), intent.id, event, payload)
     end
 
     :ok

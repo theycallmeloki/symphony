@@ -107,6 +107,19 @@ defmodule SymphonyElixir.Tracker do
     end
   end
 
+  @doc """
+  Whether the active tracker adapter can take run-completion handoff
+  itself (it implements `notify_run_finished/3`): true for intent-backed
+  stores that park or terminate the thread on the orchestrator's behalf
+  (redka → awaiting), false for read-only provider adapters, for which the
+  orchestrator keeps its own retry/state policy.
+  """
+  @spec can_park_runs?() :: boolean()
+  def can_park_runs? do
+    adapter = adapter()
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :notify_run_finished, 3)
+  end
+
   @spec adapter() :: module()
   def adapter do
     Config.settings!().tracker

@@ -11,19 +11,22 @@ defmodule SymphonyElixir.RepoDelta do
     workspace as a fresh git checkout (one base commit), so the agent
     edits real files with full repository context instead of an empty
     scratch directory.
-  * `emit_delta/3` runs after the agent finishes and delivers the
-    workspace's edits back to sandman's git delta receiver (`POST
-    /api/v1/git/delta`) — changed and added file contents plus deleted
-    paths, applied by the control plane onto the mapped repository as one
-    new commit that re-triggers any pipeline bound to the repo URL. This
-    is the sandman-native "keep editing the codebase with patches" loop:
-    the runtime never pushes, never holds credentials, and the checkout
+  * `emit_delta/1` delivers a parked workspace's edits back to sandman's
+    git delta receiver (`POST /api/v1/git/delta`) — changed and added
+    file contents plus deleted paths, applied by the control plane onto
+    the mapped repository as one new commit that re-triggers any pipeline
+    bound to the repo URL. Delivery is confirmed against the mirror
+    before it counts (see `confirm_delivery/5`); emission is human-driven
+    through the deploy action, never automatic at run end. This is the
+    sandman-native "keep editing the codebase with patches" loop: the
+    runtime never pushes, never holds credentials, and the checkout
     itself is left untouched.
 
-  Both steps are best-effort and local-only (worker-host execution is not
-  supported yet): failures log and never fail or alter the agent run.
-  The feature is inert unless `SANDMAN_ADDR` is set and the intent has a
-  `repo`, so non-repo workflows are unchanged.
+  Both steps are local-only (worker-host execution is not supported yet).
+  Bootstrap is best-effort and never fails the agent run; emission is
+  failure-surfacing because the deploy action must know whether the edit
+  actually landed. The feature is inert unless `SANDMAN_ADDR` is set and
+  the intent has a `repo`, so non-repo workflows are unchanged.
   """
 
   require Logger
@@ -86,25 +89,6 @@ defmodule SymphonyElixir.RepoDelta do
   end
 
   @doc """
-  Best-effort delta emission: logs failures, never raises.
-  """
-  @spec best_effort_emit(Path.t(), Issue.t(), String.t() | nil) :: :ok
-  def best_effort_emit(workspace, issue, worker_host) do
-    case emit_delta(workspace, issue, worker_host) do
-      {:ok, _detail} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("RepoDelta emit skipped #{issue_log(issue)} reason=#{inspect(reason)}")
-        :ok
-    end
-  rescue
-    error ->
-      Logger.error("RepoDelta emit crashed #{issue_log(issue)} error=#{Exception.message(error)}")
-      :ok
-  end
-
-  @doc """
   Materializes the mapped repository's head into `workspace` as a real git
   checkout (one base commit) and records the mirror revision in
   `.sandman-src`. Returns `:ok`, or `{:error, reason}`; a repo that is not
@@ -145,13 +129,8 @@ defmodule SymphonyElixir.RepoDelta do
   carries a `.sandman-src` marker) — arbitrary workspaces are never
   emitted. Returns `{:ok, :no_changes}` when the agent changed nothing.
   """
-  @spec emit_delta(Path.t(), Issue.t(), String.t() | nil) ::
-          {:ok, :delivered | :no_changes} | {:error, term()}
-  def emit_delta(_workspace, _issue, worker_host) when is_binary(worker_host) do
-    {:error, {:remote_workspace_unsupported, worker_host}}
-  end
-
-  def emit_delta(workspace, _issue, nil) do
+  @spec emit_delta(Path.t()) :: {:ok, :delivered | :no_changes} | {:error, term()}
+  def emit_delta(workspace) do
     with {:ok, base} <- require_sandman(),
          {:ok, %{"url" => repo, "branch" => branch, "revision" => revision}} <-
            read_marker(workspace),

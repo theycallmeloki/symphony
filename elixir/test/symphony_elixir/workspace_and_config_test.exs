@@ -451,7 +451,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       dispatchable: false
     }
 
-    assert Issue.label_names(issue) == ["frontend", "infra"]
     assert issue.labels == ["frontend", "infra"]
     refute issue.dispatchable
   end
@@ -1695,5 +1694,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "tracker run-parking capability comes from the adapter, not the kind string" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "redka",
+      tracker_active_states: ["open"],
+      tracker_terminal_states: ["done", "failed", "cancelled"]
+    )
+
+    assert Config.settings!().tracker.kind == "redka"
+    assert SymphonyElixir.Tracker.can_park_runs?()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["open"],
+      tracker_terminal_states: ["done", "failed", "cancelled"]
+    )
+
+    assert Config.settings!().tracker.kind == "memory"
+    refute SymphonyElixir.Tracker.can_park_runs?()
   end
 end

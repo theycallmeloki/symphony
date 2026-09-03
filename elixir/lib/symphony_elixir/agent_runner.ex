@@ -1,7 +1,7 @@
   defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
   Executes a single tracker work item in its workspace with the configured
-  agent runtime (pi via pi-acp by default).
+  agent runtime (codex by default; pi-acp when configured).
 
   Runs are *threaded*: when the SessionRegistry is live the agent session
   is parked between dispatches, so the next human prompt in the same

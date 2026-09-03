@@ -201,15 +201,6 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   @doc """
-  Parks an intent back into the queue: `open` -> `queued` (no-op if the
-  orchestrator already claimed it; the run completes and lands terminal).
-  """
-  @spec park_intent(String.t()) :: {:ok, Intent.t()} | {:error, :not_found | :invalid_state | term()}
-  def park_intent(id) when is_binary(id) do
-    transition_intent(id, "queued", ["open"], %{})
-  end
-
-  @doc """
   Assigns a job spec (description) to a queued intent, keeping it queued.
   """
   @spec assign_intent(String.t(), map()) ::

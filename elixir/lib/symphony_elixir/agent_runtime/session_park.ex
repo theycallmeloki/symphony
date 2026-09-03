@@ -7,25 +7,25 @@ defmodule SymphonyElixir.AgentRuntime.SessionPark do
   `SessionPark` is a dedicated long-lived process per issue that owns the
   session port and executes turns on demand, staying alive between
   dispatches: the human sends the next prompt in the same thread, the
-  orchestrator dispatches again, and `AgentRunner` resumes the *same* pi
-  session — full conversation, no context loss (the github-automation
-  "one dumb runner, session continues" pattern).
+  orchestrator dispatches again, and `AgentRunner` resumes the *same*
+  agent session — full conversation, no context loss (the
+  github-automation "one dumb runner, session continues" pattern).
 
   Protocol (plain messages, one consumer):
 
     * `{:run_turn, from, prompt, issue, on_message}` — run one prompt turn
       on the owned session, streaming updates through `on_message`, and
       reply `{:turn_result, result}`.
-    * `{:stop_session, from}` — close the pi session, reply `:stopped`, and
-      exit.
+    * `{:stop_session, from}` — close the agent session, reply `:stopped`,
+      and exit.
     * `{:DOWN, _, :process, registry_pid, _}` — the SessionRegistry died;
       close the session and exit.
 
   The park is created by `SessionRegistry` (which blocks for readiness) and
   monitored by it; the park monitors the registry back so an orphaned park
-  cannot leak a pi process. If the park itself crashes mid-turn the port
-  dies with it; the registry removes the mapping and the next dispatch
-  starts a fresh session.
+  cannot leak an agent process. If the park itself crashes mid-turn the
+  port dies with it; the registry removes the mapping and the next
+  dispatch starts a fresh session.
   """
 
   require Logger

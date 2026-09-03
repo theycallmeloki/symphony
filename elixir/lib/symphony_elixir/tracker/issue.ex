@@ -47,11 +47,6 @@ defmodule SymphonyElixir.Tracker.Issue do
           updated_at: DateTime.t() | nil
         }
 
-  @spec label_names(t()) :: [String.t()]
-  def label_names(%__MODULE__{labels: labels}) do
-    labels
-  end
-
   @spec routable?(t(), [String.t()]) :: boolean()
   def routable?(%__MODULE__{dispatchable: true, labels: labels}, required_labels)
       when is_list(labels) and is_list(required_labels) do

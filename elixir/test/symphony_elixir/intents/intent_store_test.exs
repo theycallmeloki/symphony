@@ -147,11 +147,6 @@ defmodule SymphonyElixir.Intents.IntentStoreTest do
       assert {:ok, %Intent{state: "open"}} = IntentStore.get_intent(intent.id)
     end
 
-    test "park moves open back to queued" do
-      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
-      assert {:ok, %Intent{state: "queued"}} = IntentStore.park_intent(intent.id)
-    end
-
     test "assign updates the description while staying queued" do
       {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
 

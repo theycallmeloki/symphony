@@ -650,7 +650,10 @@ defmodule SymphonyElixir.Orchestrator do
         # Parking only works on a tracker whose notify_run_finished parks
         # the issue (redka -> awaiting); read-only trackers keep the
         # legacy restart-with-backoff path so the cap never strands them.
-        if cap > 0 and attempt >= cap and Config.settings!().tracker.kind == "redka" do
+        # The capability comes from the adapter, not the configured kind
+        # string — any tracker that implements run-completion handoff is
+        # parkable, and a read-only one never is.
+        if cap > 0 and attempt >= cap and Tracker.can_park_runs?() do
           # Restarting again would only churn the agent slot: the run has
           # stalled past the cap, so park the thread `awaiting` WITH its
           # workspace (the work it produced is the operator's recovery
@@ -666,7 +669,7 @@ defmodule SymphonyElixir.Orchestrator do
           # terminate_running_issue below records the session totals
           journal_run_finished(running_entry, issue_id, "completed", %{"error" => detail})
 
-          # The redka adapter parks the thread (open -> awaiting); the
+          # The adapter parks the thread (open -> awaiting for redka); the
           # workspace is retained by terminate_running_issue below.
           Tracker.notify_run_finished(issue_id, "completed", %{"error" => detail})
 

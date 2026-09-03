@@ -2,9 +2,10 @@ defmodule SymphonyElixir.AgentRuntime.SessionRegistry do
   @moduledoc """
   Owns the parked per-thread agent sessions.
 
-  One `SessionPark` process per issue keeps the pi session (an OS port)
-  alive between orchestrator dispatches so a thread's conversation
-  survives across human prompts. The registry:
+  One `SessionPark` process per issue keeps the agent session (an OS
+  port, pi-acp or codex per the configured runtime) alive between
+  orchestrator dispatches so a thread's conversation survives across
+  human prompts. The registry:
 
     * `acquire/2` — returns the live park for an issue, starting one (and
       its agent session) on first use. Blocking while the session boots.
@@ -13,8 +14,8 @@ defmodule SymphonyElixir.AgentRuntime.SessionRegistry do
     * `stop/1` — kills the park (aborting any in-flight turn) and drops
       the mapping; called when a thread reaches a terminal state
       (IntentStore hook) or is explicitly stopped.
-    * monitors every park and auto-cleans on crash, so a dead pi process
-      never leaves a stale mapping.
+    * monitors every park and auto-cleans on crash, so a dead agent
+      process never leaves a stale mapping.
 
   Inert when the process is not running (unit tests without the supervisor
   tree): `acquire` returns `{:error, :not_running}` and callers fall back

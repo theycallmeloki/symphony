@@ -176,18 +176,37 @@ defmodule SymphonyElixir.RepoDelta do
                json: payload,
                receive_timeout: @http_timeout_ms
              ) do
-          {:ok, %{status: 200}} ->
-            Logger.info("RepoDelta delivered #{map_size(files)} changed / #{length(deleted)} deleted repo=#{repo}")
+          {:ok, %{status: 200, body: body}} ->
+            # A 200 only means the receiver ACCEPTED the delivery. The
+            # receiver reports whether the edit actually landed (applied),
+            # and older daemons stay silent — so a delivery is confirmed
+            # against the mirror before it counts: an edit that bound no
+            # pipeline (the URL-spelling drift that dropped whole deploys)
+            # or failed the base check must surface as an error here, not
+            # a success with no commit behind it.
+            case confirm_delivery(body, base, repo_name(repo), branch, head) do
+              :ok ->
+                Logger.info(
+                  "RepoDelta delivered #{map_size(files)} changed / #{length(deleted)} deleted repo=#{repo}"
+                )
 
-            # The receiver recorded `head` (our git HEAD, the payload's
-            # revision) as the new head marker, so the workspace can keep
-            # producing deltas: fold the delivered state into a new base
-            # commit and re-point the marker at the delivered revision.
-            # Best effort — a failure only means a later emit would carry
-            # a stale base.
-            commit_after_emit(workspace, head)
+                # The receiver recorded `head` (our git HEAD, the payload's
+                # revision) as the new head marker, so the workspace can keep
+                # producing deltas: fold the delivered state into a new base
+                # commit and re-point the marker at the delivered revision.
+                # Best effort — a failure only means a later emit would carry
+                # a stale base.
+                commit_after_emit(workspace, head)
 
-            {:ok, :delivered}
+                {:ok, :delivered}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "RepoDelta delivery not applied repo=#{repo} reason=#{inspect(reason)}"
+                )
+
+                {:error, reason}
+            end
 
           {:ok, %{status: status, body: body}} ->
             {:error, {:delta_rejected, status, body}}
@@ -198,6 +217,70 @@ defmodule SymphonyElixir.RepoDelta do
       end
     else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # -- delivery confirmation ----------------------------------------------
+
+  @doc """
+  Confirms a delta delivery actually landed on the mirror. The receiver's
+  response is authoritative when it reports `applied` (newer daemons); an
+  older daemon that says only `ok` gets verified by reading the mirror
+  head's recorded revision back — a committed delta records the payload's
+  revision as the new head marker, so a head marker equal to our delivered
+  revision is proof the edit applied. Returns `:ok` or
+  `{:error, {:delta_not_applied | :delta_unconfirmed, detail}}`.
+  """
+  @spec confirm_delivery(term(), String.t(), String.t(), String.t(), String.t()) ::
+          :ok | {:error, term()}
+  def confirm_delivery(body, base, repo, branch, revision)
+      when is_binary(base) and is_binary(repo) and is_binary(branch) and is_binary(revision) do
+    case delivery_outcome(body) do
+      :applied ->
+        :ok
+
+      {:not_applied, reason} ->
+        {:error, {:delta_not_applied, reason}}
+
+      :unknown ->
+        # no applied report (older receiver): the committed delta records
+        # our revision as the head marker — read it back and compare
+        confirm_marker(base, repo, branch, revision)
+    end
+  end
+
+  @doc """
+  The delivery verdict from a receiver response body: `:applied` when the
+  receiver reports the edit committed, `{:not_applied, reason}` when it
+  reports the edit did not (unbound URL, failed base check), `:unknown`
+  when the body carries no report (older daemons reply `{"ok": "true"}`
+  regardless). Exposed for tests: pure given the decoded body.
+  """
+  @spec delivery_outcome(term()) :: :applied | {:not_applied, String.t()} | :unknown
+  def delivery_outcome(%{"applied" => true}), do: :applied
+
+  def delivery_outcome(%{"applied" => false} = body),
+    do: {:not_applied, Map.get(body, "reason", "delta not applied")}
+
+  def delivery_outcome(_), do: :unknown
+
+  defp confirm_marker(base, repo, branch, revision) do
+    # the receiver commits before responding, so one read-back suffices;
+    # retry briefly for transport slack
+    result =
+      Enum.reduce_while(1..3, :unknown, fn _, _acc ->
+        Process.sleep(100)
+
+        case mapped_head(base, repo, branch) do
+          {:ok, _head_id, ^revision} -> {:halt, :ok}
+          {:ok, _head_id, _other} -> {:cont, :unknown}
+          {:error, _reason} -> {:cont, :unknown}
+        end
+      end)
+
+    case result do
+      :ok -> :ok
+      _ -> {:error, {:delta_unconfirmed, "mirror head does not record delivered revision"}}
     end
   end
 

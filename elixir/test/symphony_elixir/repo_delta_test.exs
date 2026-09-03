@@ -161,6 +161,65 @@ defmodule SymphonyElixir.RepoDeltaTest do
     end
   end
 
+  describe "delivery_outcome/1" do
+    test "a receiver report of applied commits the delivery" do
+      assert :applied = RepoDelta.delivery_outcome(%{"ok" => "true", "applied" => true})
+    end
+
+    test "a receiver report of not-applied names the refusal" do
+      body = %{"ok" => "true", "applied" => false, "reason" => "no pipeline is bound to https://x/y.git"}
+      assert {:not_applied, reason} = RepoDelta.delivery_outcome(body)
+      assert reason =~ "no pipeline is bound"
+    end
+
+    test "a bare ok report (older receiver) is unknown — verification falls back to the mirror" do
+      assert :unknown = RepoDelta.delivery_outcome(%{"ok" => "true"})
+    end
+
+    test "a binary body is unknown" do
+      assert :unknown = RepoDelta.delivery_outcome("{\"ok\":\"true\"}\n")
+    end
+  end
+
+  describe "confirm_delivery/5" do
+    test "an applied report confirms without touching the mirror" do
+      assert :ok =
+               RepoDelta.confirm_delivery(
+                 %{"ok" => "true", "applied" => true},
+                 "http://mirror",
+                 "some_repo",
+                 "master",
+                 "rev1"
+               )
+    end
+
+    test "a not-applied report is surfaced as an error with the receiver's reason" do
+      assert {:error, {:delta_not_applied, reason}} =
+               RepoDelta.confirm_delivery(
+                 %{"ok" => "true", "applied" => false, "reason" => "delta base mismatch"},
+                 "http://mirror",
+                 "some_repo",
+                 "master",
+                 "rev1"
+               )
+
+      assert reason =~ "mismatch"
+    end
+
+    test "an unknown report reaches the mirror read-back (and reports when the head never records the revision)" do
+      # no mirror is reachable at this address, so the read-back cannot
+      # confirm — the delivery must NOT be reported as delivered
+      assert {:error, {:delta_unconfirmed, _}} =
+               RepoDelta.confirm_delivery(
+                 %{"ok" => "true"},
+                 "http://127.0.0.1:1",
+                 "some_repo",
+                 "master",
+                 "rev1"
+               )
+    end
+  end
+
   defp tmp_workspace do
     dir = Path.join(System.tmp_dir!(), "repo_delta_test_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)

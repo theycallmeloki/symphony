@@ -32,6 +32,7 @@ defmodule SymphonyElixir.Intents.Intent do
     :labels,
     :result,
     :verify_for,
+    :rework_plan,
     :created_at,
     :updated_at
   ]
@@ -47,6 +48,9 @@ defmodule SymphonyElixir.Intents.Intent do
           # set on auto-registered verification intents: the identifier of
           # the thread whose build this pass verifies
           verify_for: String.t() | nil,
+          # structured rework plan recorded when a verification pass
+          # concludes NOT_SOLVED (see Intents.ReworkPlan); nil otherwise
+          rework_plan: map() | nil,
           created_at: String.t() | nil,
           updated_at: String.t() | nil
         }
@@ -84,6 +88,7 @@ defmodule SymphonyElixir.Intents.Intent do
         labels: normalize_labels(attrs[:labels]),
         result: nil,
         verify_for: blank_to_nil(attrs[:verify_for]),
+        rework_plan: nil,
         created_at: now,
         updated_at: now
       }
@@ -103,6 +108,7 @@ defmodule SymphonyElixir.Intents.Intent do
       labels: decode_json_list(fields["labels"]),
       result: decode_json_map(fields["result"]),
       verify_for: blank_value(fields["verify_for"]),
+      rework_plan: decode_json_map(fields["rework_plan"]),
       created_at: fields["created_at"],
       updated_at: fields["updated_at"]
     }
@@ -119,6 +125,7 @@ defmodule SymphonyElixir.Intents.Intent do
       "labels" => Jason.encode!(intent.labels || []),
       "result" => encode_json_map(intent.result),
       "verify_for" => store_value(intent.verify_for),
+      "rework_plan" => encode_json_map(intent.rework_plan),
       "created_at" => store_value(intent.created_at),
       "updated_at" => store_value(intent.updated_at)
     }
@@ -159,11 +166,11 @@ defmodule SymphonyElixir.Intents.Intent do
       labels: intent.labels || [],
       result: intent.result,
       verify_for: intent.verify_for,
+      rework_plan: intent.rework_plan,
       created_at: intent.created_at,
       updated_at: intent.updated_at
     }
   end
-
 
   defp to_atom(key) when is_atom(key), do: key
   defp to_atom(key) when is_binary(key), do: String.to_atom(key)
@@ -232,6 +239,7 @@ defmodule SymphonyElixir.Intents.Intent do
   end
 
   defp decode_json_list(nil), do: []
+
   defp decode_json_list(value) when is_binary(value) do
     case Jason.decode(value) do
       {:ok, list} when is_list(list) -> list
@@ -240,6 +248,7 @@ defmodule SymphonyElixir.Intents.Intent do
   end
 
   defp decode_json_map(nil), do: nil
+
   defp decode_json_map(value) when is_binary(value) do
     case Jason.decode(value) do
       {:ok, map} when is_map(map) -> map

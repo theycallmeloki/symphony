@@ -221,6 +221,51 @@ defmodule SymphonyElixir.Intents.IntentStore do
     transition_intent(id, "open", ["queued", "awaiting"], changes)
   end
 
+  @doc """
+  Records a structured rework plan on the thread (see Intents.ReworkPlan):
+  set by the verdict recorder when a verification pass concludes
+  NOT_SOLVED, replaced on a later NOT_SOLVED, cleared with `nil` when a
+  later pass concludes SOLVED. Best-effort over any non-terminal state;
+  never changes the thread's state.
+  """
+  @spec record_rework_plan(String.t(), map() | nil) ::
+          {:ok, Intent.t()} | {:error, :not_found | term()}
+  def record_rework_plan(id, plan) when is_binary(id) and (is_map(plan) or is_nil(plan)) do
+    with {:ok, %Intent{} = current} <- get_intent(id) do
+      if Intent.terminal_state?(current.state) do
+        {:error, :terminal_state}
+      else
+        updated = %{current | rework_plan: plan, updated_at: DateTime.utc_now() |> DateTime.to_iso8601()}
+
+        case write_intent(updated) do
+          :ok -> {:ok, updated}
+          {:error, reason} = error -> error
+        end
+      end
+    end
+  end
+
+  @doc """
+  Marks the current rework plan as delivered: the first dispatch that
+  prepends the plan to its prompt calls this so later prompts in the same
+  thread do not repeat a stale plan (a fresh NOT_SOLVED verdict replaces
+  it and resets the flag via record_rework_plan/2).
+  """
+  @spec mark_rework_plan_dispatched(String.t()) :: :ok | {:error, :not_found | term()}
+  def mark_rework_plan_dispatched(id) when is_binary(id) do
+    with {:ok, %Intent{rework_plan: %{} = plan} = current} <- get_intent(id) do
+      write_intent(%{
+        current
+        | rework_plan: Map.put(plan, "dispatched_at", DateTime.utc_now() |> DateTime.to_iso8601()),
+          updated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+
+      :ok
+    end
+  end
+
+  def mark_rework_plan_dispatched(_id), do: :ok
+
   defp transition_intent(id, to_state, from_states, changes) when is_binary(id) do
     with {:ok, %Intent{} = current} <- get_intent(id),
          true <- current.state in from_states do

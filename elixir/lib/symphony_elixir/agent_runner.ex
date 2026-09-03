@@ -1,4 +1,4 @@
-  defmodule SymphonyElixir.AgentRunner do
+defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
   Executes a single tracker work item in its workspace with the configured
   agent runtime (codex by default; pi-acp when configured).
@@ -12,6 +12,7 @@
   """
 
   require Logger
+
   alias SymphonyElixir.{
     AgentRuntime,
     Config,
@@ -21,8 +22,9 @@
     Tracker,
     Workspace
   }
+
   alias SymphonyElixir.AgentRuntime.{SessionPark, SessionRegistry}
-  alias SymphonyElixir.Intents.{Intent, IntentStore}
+  alias SymphonyElixir.Intents.{Intent, IntentStore, ReworkPlan}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -126,12 +128,14 @@
           [verdict | evidence_lines] ->
             verdict_atom = normalize_verdict(verdict)
             event = verdict_event(verdict_atom)
+            plan = apply_rework_plan(verdict_atom, workspace, verify_for)
 
             payload = %{
               "verify_intent" => verify_intent_id,
               "workspace" => workspace,
               "verdict" => to_string(verdict_atom),
-              "evidence" => Enum.join(evidence_lines, "\n")
+              "evidence" => Enum.join(evidence_lines, "\n"),
+              "rework" => rework_summary(plan)
             }
 
             if RunJournal.enabled?() do
@@ -140,9 +144,7 @@
             end
 
           _ ->
-            Logger.warning(
-              "verify.txt present but unreadable as a verdict verify_intent=#{verify_intent_id}"
-            )
+            Logger.warning("verify.txt present but unreadable as a verdict verify_intent=#{verify_intent_id}")
         end
 
       {:error, :enoent} ->
@@ -153,6 +155,35 @@
     end
 
     :ok
+  end
+
+  # Rework-plan lifecycle on the thread: a NOT_SOLVED verdict stores the
+  # pass's rework.json (replacing any prior plan), a SOLVED verdict clears
+  # the plan, an UNCLEAR verdict leaves it untouched. Best effort.
+  defp apply_rework_plan(:solved, _workspace, verify_for) do
+    IntentStore.record_rework_plan(verify_for, nil)
+    nil
+  end
+
+  defp apply_rework_plan(:not_solved, workspace, verify_for) do
+    plan = ReworkPlan.parse_file(Path.join(workspace, ReworkPlan.file_name()))
+    IntentStore.record_rework_plan(verify_for, plan)
+
+    if plan do
+      Logger.info("Verification rework plan recorded thread=#{verify_for} items=#{length(plan["items"] || [])}")
+    else
+      Logger.warning("NOT_SOLVED verdict without a parseable rework.json verify_workspace=#{workspace}")
+    end
+
+    plan
+  end
+
+  defp apply_rework_plan(:unclear, _workspace, _verify_for), do: nil
+
+  defp rework_summary(nil), do: nil
+
+  defp rework_summary(%{} = plan) do
+    %{"summary" => plan["summary"] || "", "item_count" => length(plan["items"] || [])}
   end
 
   defp normalize_verdict(line) do
@@ -307,7 +338,11 @@
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+    issue
+    |> PromptBuilder.build_prompt(opts)
+    |> prepend_rework_plan(issue)
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -319,6 +354,31 @@
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
+  end
+
+  # The first turn of a re-dispatch carries the thread's recorded rework
+  # plan (when present and not yet delivered) so the failure of the last
+  # verification pass structurally drives this pass. Marked dispatched on
+  # delivery; a fresh NOT_SOLVED verdict replaces the plan and re-arms it.
+  defp prepend_rework_plan(prompt, %Issue{identifier: identifier}) when is_binary(identifier) do
+    with {:ok, %Intent{rework_plan: %{} = plan}} <- IntentStore.get_intent(identifier),
+         {:ok, block} <- rework_block(plan) do
+      :ok = IntentStore.mark_rework_plan_dispatched(identifier)
+      block <> "\n\n" <> prompt
+    else
+      _ -> prompt
+    end
+  end
+
+  defp prepend_rework_plan(prompt, _issue), do: prompt
+
+  defp rework_block(%{"dispatched_at" => dispatched}) when is_binary(dispatched), do: :error
+
+  defp rework_block(plan) do
+    case ReworkPlan.block(plan) do
+      nil -> :error
+      block -> {:ok, block}
+    end
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do

@@ -135,9 +135,7 @@ defmodule SymphonyElixir.BuildFusion do
     end
   rescue
     error ->
-      Logger.warning(
-        "BuildFusion journal failed issue=#{inspect(issue_identifier)} event=#{inspect(event)} error=#{inspect(error)}"
-      )
+      Logger.warning("BuildFusion journal failed issue=#{inspect(issue_identifier)} event=#{inspect(event)} error=#{inspect(error)}")
 
       :ok
   end
@@ -366,7 +364,27 @@ defmodule SymphonyElixir.BuildFusion do
       UNCLEAR
 
     and whose remaining lines are concise evidence: what you checked and
-    what you found. Then finish your turn.
+    what you found.
+
+    If your verdict is NOT_SOLVED, additionally write a file named
+    `rework.json` in the workspace root: a JSON object that turns the
+    failure into an actionable plan for the next pass. The shape:
+
+      {
+        "summary": "one-line statement of what is missing",
+        "items": [
+          {
+            "category": "contract|correctness|test_gap|evidence_gap|platform_contract|env_interface|other",
+            "severity": "blocking|should|nice",
+            "problem": "what is wrong or missing",
+            "change": "the concrete change the next pass should make"
+          }
+        ]
+      }
+
+    Every blocking gap must be its own item; do not fold multiple failures
+    into one item. Write the file even when NOT_SOLVED has no itemized
+    gaps (empty items list, summary explains why). Then finish your turn.
     """
 
     title =
@@ -392,9 +410,7 @@ defmodule SymphonyElixir.BuildFusion do
         {:ok, verify_id}
 
       {:error, reason} ->
-        Logger.error(
-          "verification intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}"
-        )
+        Logger.error("verification intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}")
 
         {:error, reason}
     end

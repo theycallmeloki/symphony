@@ -167,6 +167,64 @@ defmodule SymphonyElixir.Intents.IntentStoreTest do
     end
   end
 
+  describe "rework plan lifecycle" do
+    test "record_rework_plan stores the plan on the thread" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+
+      plan = %{
+        "summary" => "missing OUT write",
+        "items" => [
+          %{
+            "category" => "platform_contract",
+            "severity" => "blocking",
+            "problem" => "no result.json",
+            "change" => "write $OUT/result.json"
+          }
+        ]
+      }
+
+      assert {:ok, %Intent{rework_plan: stored}} = IntentStore.record_rework_plan(intent.id, plan)
+      assert stored["summary"] == "missing OUT write"
+      assert [item] = stored["items"]
+      assert item["category"] == "platform_contract"
+
+      # survives a store round trip (encode -> decode)
+      assert {:ok, %Intent{rework_plan: ^stored}} = IntentStore.get_intent(intent.id)
+    end
+
+    test "record_rework_plan(nil) clears the plan" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+
+      {:ok, _} =
+        IntentStore.record_rework_plan(intent.id, %{"summary" => "s", "items" => []})
+
+      assert {:ok, %Intent{rework_plan: plan}} = IntentStore.get_intent(intent.id)
+      assert plan["summary"] == "s"
+
+      assert {:ok, %Intent{rework_plan: nil}} = IntentStore.record_rework_plan(intent.id, nil)
+    end
+
+    test "mark_rework_plan_dispatched stamps the plan once" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+
+      {:ok, _} = IntentStore.record_rework_plan(intent.id, %{"summary" => "s", "items" => []})
+      assert :ok = IntentStore.mark_rework_plan_dispatched(intent.id)
+
+      assert {:ok, %Intent{rework_plan: plan}} = IntentStore.get_intent(intent.id)
+      assert is_binary(plan["dispatched_at"])
+
+      # idempotent on a second call
+      assert :ok = IntentStore.mark_rework_plan_dispatched(intent.id)
+    end
+
+    test "rework fns are no-ops on terminal threads" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+      :ok = terminal(intent.id, "done")
+
+      assert {:error, :terminal_state} = IntentStore.record_rework_plan(intent.id, %{"items" => []})
+    end
+  end
+
   defp terminal(id, state) do
     {:ok, _} = IntentStore.set_terminal_state(id, state, %{"status" => state})
     :ok

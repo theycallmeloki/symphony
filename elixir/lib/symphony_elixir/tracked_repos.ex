@@ -10,13 +10,12 @@ defmodule SymphonyElixir.TrackedRepos do
   current state, so job launch only offers repos that are actually being
   built.
 
-  The feature is inert unless `SANDMAN_ADDR` names a sandman control
-  plane.
+  The sandman interaction goes through the `sandman` CLI public interface
+  (`Sandman.repos/0`, `Sandman.pipelines/0`). The feature is inert unless
+  `SANDMAN_ADDR` names a sandman control plane.
   """
 
-  alias SymphonyElixir.RepoDelta
-
-  @http_timeout_ms 15_000
+  alias SymphonyElixir.Sandman
 
   @type tracked_repo :: %{
           repo: String.t(),
@@ -26,31 +25,23 @@ defmodule SymphonyElixir.TrackedRepos do
         }
 
   @doc """
-  Fetches the tracked repositories from the sandman control plane.
-
-  GETs `{base}/api/v1/repos` and `{base}/api/v1/pipelines` with a 15s
-  receive timeout. Returns `{:error, :not_configured}` when no `SANDMAN_ADDR`
-  is set. Both requests are best-effort, but a failure is never silently
-  degraded into a partial list: a failed repos fetch means no mirror list at
-  all, and a failed pipelines fetch means trackedness is unknown, so either
-  failure yields `{:error, reason}`.
+  Fetches the tracked repositories from the sandman control plane via the
+  CLI's JSON repo + pipeline listings. Returns `{:error, :not_configured}`
+  when no `SANDMAN_ADDR` is set. Both listings are best-effort, but a
+  failure is never silently degraded into a partial list: a failed repos
+  fetch means no mirror list at all, and a failed pipelines fetch means
+  trackedness is unknown, so either failure yields `{:error, reason}`.
   """
   @spec fetch() :: {:ok, [tracked_repo()]} | {:error, term()}
   def fetch do
-    case RepoDelta.sandman_base() do
+    case Sandman.sandman_base() do
       nil ->
         {:error, :not_configured}
 
-      base ->
-        case Req.get(base <> "/api/v1/repos", receive_timeout: @http_timeout_ms) do
-          {:ok, %{status: 200, body: repos}} when is_list(repos) ->
-            fetch_pipelines(base, repos)
-
-          {:ok, %{status: status}} ->
-            {:error, {:repos_unavailable, status}}
-
-          {:error, reason} ->
-            {:error, reason}
+      _base ->
+        with {:ok, repos} <- Sandman.repos(),
+             {:ok, pipelines} <- Sandman.pipelines() do
+          {:ok, reconcile(repos, pipelines)}
         end
     end
   end
@@ -99,19 +90,6 @@ defmodule SymphonyElixir.TrackedRepos do
     case pipeline do
       %{"input" => %{"git" => %{"url" => url}}} when is_binary(url) and url != "" -> url
       _ -> nil
-    end
-  end
-
-  defp fetch_pipelines(base, repos) do
-    case Req.get(base <> "/api/v1/pipelines", receive_timeout: @http_timeout_ms) do
-      {:ok, %{status: 200, body: pipelines}} when is_list(pipelines) ->
-        {:ok, reconcile(repos, pipelines)}
-
-      {:ok, %{status: status}} ->
-        {:error, {:pipelines_unavailable, status}}
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 end

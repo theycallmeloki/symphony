@@ -32,6 +32,7 @@ defmodule SymphonyElixir.RepoDelta do
   require Logger
 
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.Sandman
 
   @marker ".sandman-src"
   @tracked_branch_env "SANDMAN_DEFAULT_BRANCH"
@@ -150,19 +151,13 @@ defmodule SymphonyElixir.RepoDelta do
           "private" => false
         }
 
-        case Req.post(
-               base <> "/api/v1/git/delta",
-               json: payload,
-               receive_timeout: @http_timeout_ms
-             ) do
-          {:ok, %{status: 200, body: body}} ->
-            # A 200 only means the receiver ACCEPTED the delivery. The
-            # receiver reports whether the edit actually landed (applied),
-            # and older daemons stay silent — so a delivery is confirmed
-            # against the mirror before it counts: an edit that bound no
-            # pipeline (the URL-spelling drift that dropped whole deploys)
-            # or failed the base check must surface as an error here, not
-            # a success with no commit behind it.
+        case Sandman.delta(payload) do
+          {:ok, body} ->
+            # The CLI delta report is authoritative: it decodes the
+            # receiver's {applied, reason, head}. applied=false means the
+            # edit bound no pipeline (the URL-spelling drift that dropped
+            # whole deploys) or failed the base check — it must surface as
+            # an error here, not a success with no commit behind it.
             case confirm_delivery(body, base, repo_name(repo), branch, head) do
               :ok ->
                 Logger.info(
@@ -186,9 +181,6 @@ defmodule SymphonyElixir.RepoDelta do
 
                 {:error, reason}
             end
-
-          {:ok, %{status: status, body: body}} ->
-            {:error, {:delta_rejected, status, body}}
 
           {:error, reason} ->
             {:error, {:delta_transport, reason}}

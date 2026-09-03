@@ -31,7 +31,7 @@ defmodule SymphonyElixir.BuildFusion do
 
   require Logger
 
-  alias SymphonyElixir.{Config, RepoDelta, RunJournal}
+  alias SymphonyElixir.{Config, RepoDelta, RunJournal, Sandman}
 
   @default_registry "miladyosregistry.transparentlyrotatableproxy.site"
   @watch_pipeline_env "SANDMAN_WATCH_PIPELINE"
@@ -225,12 +225,22 @@ defmodule SymphonyElixir.BuildFusion do
     end
   end
 
-  defp reconcile_one(key, entry, sandman) do
+  defp reconcile_one(key, entry, _sandman) do
     issue_identifier = issue_identifier_from_key(key)
     registry = entry.registry || default_registry()
 
     fetchers = %{
-      jobs: fn -> fetch_jobs(sandman) end,
+      # Ask the daemon for exactly this head's job(s) on the watch pipeline
+      # (server-side inputCommit filter) via the sandman CLI public interface,
+      # instead of fetching a wide job window and matching envelope members.
+      jobs: fn ->
+        watch = watch_pipeline(entry.image)
+
+        case Sandman.jobs(watch, input_commits: [entry.head]) do
+          {:ok, jobs} when is_list(jobs) -> {:ok, jobs}
+          {:error, _reason} = err -> err
+        end
+      end,
       tags: fn -> fetch_tags(registry, entry.image) end
     }
 
@@ -413,14 +423,6 @@ defmodule SymphonyElixir.BuildFusion do
         Logger.error("verification intent creation failed thread=#{issue_identifier} reason=#{inspect(reason)}")
 
         {:error, reason}
-    end
-  end
-
-  defp fetch_jobs(sandman) do
-    case Req.get(sandman <> "/api/v1/jobs?limit=30", receive_timeout: @http_timeout_ms) do
-      {:ok, %{status: 200, body: jobs}} when is_list(jobs) -> {:ok, jobs}
-      {:ok, %{status: status}} -> {:error, {:unexpected_status, status}}
-      {:error, reason} -> {:error, reason}
     end
   end
 

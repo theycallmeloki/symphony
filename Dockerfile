@@ -27,17 +27,12 @@ COPY --from=pi-runtime /usr/local/bin /usr/local/bin
 COPY --from=pi-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 # sandman CLI — the stable public interface this app's sandman client
 # shells out to (RepoDelta delta/head, BuildFusion job query, TrackedRepos
-# listings), instead of reaching into sandman's HTTP API. Pinned to the
-# release the daemon fleet runs so the CLI and daemon evolve together;
-# bump SANDMAN_VERSION to the fleet's release when sandman releases.
-ARG SANDMAN_VERSION=v0.2.50
-RUN set -e; \
-    curl -fsSL -o /tmp/sandman-linux-amd64 "https://github.com/theycallmeloki/sandman/releases/download/v${SANDMAN_VERSION}/sandman-linux-amd64" && \
-    curl -fsSL -o /tmp/sandman.sha256 "https://github.com/theycallmeloki/sandman/releases/download/v${SANDMAN_VERSION}/sandman-linux-amd64.sha256" && \
-    (cd /tmp && sha256sum -c sandman.sha256) && \
-    install -m 0755 /tmp/sandman-linux-amd64 /usr/local/bin/sandman && \
-    rm -f /tmp/sandman-linux-amd64 /tmp/sandman.sha256 && \
-    command -v sandman >/dev/null
+# listings), instead of reaching into sandman's HTTP API. Built into the
+# INTERNAL registry (github.com is not reachable from the in-cluster kaniko
+# build — builds egress to Docker Hub + this registry only), pinned to the
+# fleet's release. Bump by republishing sandman-cli:<vX.Y.Z> and editing
+# the tag below when the sandman release changes.
+COPY --from=miladyosregistry.transparentlyrotatableproxy.site/sandman-cli:v0.2.50 /sandman /usr/local/bin/sandman
 USER symphony
 ENV HOME=/home/symphony
 EXPOSE 4000

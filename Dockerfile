@@ -14,7 +14,7 @@ FROM node:22-bookworm-slim AS pi-runtime
 RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent @geohar/pi-acp
 
 FROM hexpm/erlang:28.1.1-debian-bookworm-20260824-slim
-RUN apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null 2>&1 \
+RUN apt-get update -qq && apt-get install -y -qq git ca-certificates python3 python3-pip curl >/dev/null 2>&1 \
  && useradd -m -u 10001 symphony \
  && mkdir -p /app /data /home/symphony/.pi/agent/extensions /home/symphony/.pi/pi-acp \
  && chown -R symphony /app /data /home/symphony \

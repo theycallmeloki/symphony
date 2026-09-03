@@ -188,12 +188,22 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:command, :string, default: "pi-acp")
       field(:turn_timeout_ms, :integer, default: 1_800_000)
+      # Fail-closed child environment: when true, pi-acp is spawned with a
+      # scoped environment that excludes credential-class variables
+      # (tokens/keys/SSH/cloud) unless named in child_env_allow (see
+      # AgentRuntime.ChildEnv). Default ON — the "never push" rule is a
+      # process invariant, not a prompt instruction.
+      field(:child_env_isolation, :boolean, default: true)
+      # Operator-declared variables that pass through to the pi-acp child
+      # even when they match a forbidden pattern (e.g. a provider API key
+      # the pi runtime reads from the environment rather than ~/.pi files).
+      field(:child_env_allow, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:command, :turn_timeout_ms], empty_values: [])
+      |> cast(attrs, [:command, :turn_timeout_ms, :child_env_isolation, :child_env_allow], empty_values: [])
       |> validate_number(:turn_timeout_ms, greater_than: 0)
     end
   end

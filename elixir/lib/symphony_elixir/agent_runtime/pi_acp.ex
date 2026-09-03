@@ -27,6 +27,7 @@ defmodule SymphonyElixir.AgentRuntime.PiAcp do
   require Logger
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.AgentRuntime.ChildEnv
 
   @behaviour SymphonyElixir.AgentRuntime
 
@@ -122,12 +123,34 @@ defmodule SymphonyElixir.AgentRuntime.PiAcp do
   end
 
   defp spawn_port(exe, workspace) do
+    pi = Config.settings!().pi
+
+    {command, args} =
+      if pi.child_env_isolation do
+        # Fail-closed child environment via `env -i`: OTP's spawn `:env`
+        # option MERGES over the inherited environment (child = inherited
+        # ∪ overrides), so a credential variable in the orchestrator's own
+        # environment would still reach the agent. `env -i` gives the child
+        # exactly the scoped variables and nothing else — clean-room by
+        # construction; env(1) execs the command, so the port keeps the
+        # agent's pid and exit status. Disabled only by explicit
+        # pi.child_env_isolation=false configuration.
+        env_bin = System.find_executable("env") || "/usr/bin/env"
+
+        scoped = ChildEnv.scoped_env(extra_allow: pi.child_env_allow)
+        assignments = Enum.map(scoped, fn {name, value} -> "#{name}=#{value}" end)
+
+        {env_bin, ["-i" | assignments] ++ [exe]}
+      else
+        {exe, []}
+      end
+
     port =
-      Port.open({:spawn_executable, exe}, [
+      Port.open({:spawn_executable, command}, [
         :binary,
         :exit_status,
         :use_stdio,
-        args: [],
+        args: args,
         cd: workspace
       ])
 
@@ -214,8 +237,12 @@ defmodule SymphonyElixir.AgentRuntime.PiAcp do
           case handle_lines(pending <> data, %{}) do
             {:ok, lines, leftover} ->
               case consume_turn_lines(session, on_message, lines) do
-                {:ok, stop_reason} -> {:ok, stop_reason}
-                {:error, reason} -> {:error, reason}
+                {:ok, stop_reason} ->
+                  {:ok, stop_reason}
+
+                {:error, reason} ->
+                  {:error, reason}
+
                 {:continue, updated_session} ->
                   await_turn(updated_session, on_message, deadline, leftover)
               end
@@ -244,6 +271,7 @@ defmodule SymphonyElixir.AgentRuntime.PiAcp do
 
             %{"id" => @prompt_id, "result" => %{"stopReason" => reason}} ->
               updated = flush_text(session, on_message)
+
               emit(updated, on_message, :turn_completed, %{
                 session_id: updated.session_id,
                 stop_reason: reason

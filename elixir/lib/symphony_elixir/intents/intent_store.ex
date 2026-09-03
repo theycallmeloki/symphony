@@ -239,7 +239,7 @@ defmodule SymphonyElixir.Intents.IntentStore do
 
         case write_intent(updated) do
           :ok -> {:ok, updated}
-          {:error, reason} = error -> error
+          {:error, _reason} = error -> error
         end
       end
     end
@@ -265,6 +265,31 @@ defmodule SymphonyElixir.Intents.IntentStore do
   end
 
   def mark_rework_plan_dispatched(_id), do: :ok
+
+  @doc """
+  Folds a verification pass's outcome onto the thread's result map under
+  the `"verification"` key (merging, never replacing the run-completion
+  result). Makes "was the last verify SOLVED?" answerable from the intent
+  API/dashboard without reading run journals. Best-effort on non-terminal
+  threads; never changes state.
+  """
+  @spec set_verification_result(String.t(), map()) ::
+          {:ok, Intent.t()} | {:error, :not_found | :terminal_state | term()}
+  def set_verification_result(id, verification) when is_binary(id) and is_map(verification) do
+    with {:ok, %Intent{} = current} <- get_intent(id) do
+      if Intent.terminal_state?(current.state) do
+        {:error, :terminal_state}
+      else
+        result = Map.put(current.result || %{}, "verification", verification)
+        updated = %{current | result: result, updated_at: DateTime.utc_now() |> DateTime.to_iso8601()}
+
+        case write_intent(updated) do
+          :ok -> {:ok, updated}
+          {:error, _reason} = error -> error
+        end
+      end
+    end
+  end
 
   defp transition_intent(id, to_state, from_states, changes) when is_binary(id) do
     with {:ok, %Intent{} = current} <- get_intent(id),

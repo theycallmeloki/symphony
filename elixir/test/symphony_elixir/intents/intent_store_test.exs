@@ -225,6 +225,45 @@ defmodule SymphonyElixir.Intents.IntentStoreTest do
     end
   end
 
+  describe "verification result" do
+    test "set_verification_result merges under result.verification, preserving the run result" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+      {:ok, _} = IntentStore.complete_to_awaiting(intent.id, %{"status" => "completed", "at" => "t0"})
+
+      {:ok, _} =
+        IntentStore.set_verification_result(intent.id, %{
+          "verdict" => "not_solved",
+          "verify_intent" => "int-verify-1",
+          "at" => "t1",
+          "evidence" => "no OUT write",
+          "rework_item_count" => 2
+        })
+
+      assert {:ok, %Intent{result: result}} = IntentStore.get_intent(intent.id)
+      assert result["status"] == "completed"
+      assert result["verification"]["verdict"] == "not_solved"
+      assert result["verification"]["verify_intent"] == "int-verify-1"
+      assert result["verification"]["rework_item_count"] == 2
+    end
+
+    test "a later verdict replaces the previous verification" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job"})
+
+      {:ok, _} = IntentStore.set_verification_result(intent.id, %{"verdict" => "not_solved"})
+      {:ok, _} = IntentStore.set_verification_result(intent.id, %{"verdict" => "solved"})
+
+      assert {:ok, %Intent{result: result}} = IntentStore.get_intent(intent.id)
+      assert result["verification"]["verdict"] == "solved"
+    end
+
+    test "terminal threads reject verification results" do
+      {:ok, intent} = IntentStore.create_intent(%{"title" => "job", "state" => "queued"})
+      :ok = terminal(intent.id, "done")
+
+      assert {:error, :terminal_state} = IntentStore.set_verification_result(intent.id, %{"verdict" => "solved"})
+    end
+  end
+
   defp terminal(id, state) do
     {:ok, _} = IntentStore.set_terminal_state(id, state, %{"status" => state})
     :ok

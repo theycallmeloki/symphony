@@ -129,14 +129,29 @@ defmodule SymphonyElixir.AgentRunner do
             verdict_atom = normalize_verdict(verdict)
             event = verdict_event(verdict_atom)
             plan = apply_rework_plan(verdict_atom, workspace, verify_for)
+            evidence = Enum.join(evidence_lines, "\n")
 
             payload = %{
               "verify_intent" => verify_intent_id,
               "workspace" => workspace,
               "verdict" => to_string(verdict_atom),
-              "evidence" => Enum.join(evidence_lines, "\n"),
+              "evidence" => evidence,
               "rework" => rework_summary(plan)
             }
+
+            # Verdict visibility: fold the pass's outcome onto the thread's
+            # intent.result so the API/dashboard can answer "was the last
+            # verify SOLVED?" without reading run journals.
+            IntentStore.set_verification_result(
+              verify_for,
+              %{
+                "verdict" => to_string(verdict_atom),
+                "verify_intent" => verify_intent_id,
+                "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+                "evidence" => truncate_evidence(evidence),
+                "rework_item_count" => rework_item_count(plan)
+              }
+            )
 
             if RunJournal.enabled?() do
               RunJournal.record(RunJournal.root(), verify_for, event, payload)
@@ -185,6 +200,21 @@ defmodule SymphonyElixir.AgentRunner do
   defp rework_summary(%{} = plan) do
     %{"summary" => plan["summary"] || "", "item_count" => length(plan["items"] || [])}
   end
+
+  defp rework_item_count(nil), do: 0
+  defp rework_item_count(%{} = plan), do: length(plan["items"] || [])
+
+  # Keep intent.result light for API/dashboard responses: cap evidence at a
+  # summary-sized excerpt; the full trail stays in the run journal.
+  defp truncate_evidence(evidence) when is_binary(evidence) do
+    if String.length(evidence) > 400 do
+      String.slice(evidence, 0, 400) <> "..."
+    else
+      evidence
+    end
+  end
+
+  defp truncate_evidence(_evidence), do: ""
 
   defp normalize_verdict(line) do
     case line |> String.trim() |> String.upcase() do
